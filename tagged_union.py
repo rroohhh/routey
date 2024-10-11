@@ -3,7 +3,7 @@
 from amaranth import Signal, ShapeCastable, Const, Shape, Module
 from amaranth.lib import data
 from amaranth.lib.data import View, StructLayout, UnionLayout
-from amaranth.back.verilog import convert
+from amaranth.back.rtlil import convert
 import amaranth.lib.enum
 import contextlib
 
@@ -129,14 +129,12 @@ class TaggedUnion(View, metaclass=_TaggedUnionMeta):
         with m.Default():
             yield
 
-
 if __name__ == "__main__":
     class StructA(data.Struct):
         value_a: 32
 
     class StructB(data.Struct):
         value_b: 16
-
 
     class SomeTaggedUnion(TaggedUnion):
         a: StructA

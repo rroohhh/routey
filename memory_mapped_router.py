@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 
-from tagged_union import *
-from amaranth import Signal, Assert, Mux, Print, Format
+from .tagged_union import *
+from amaranth import Signal, Mux, Print, Format
+from amaranth.hdl._ast import SwitchValue
 from amaranth.sim import Simulator, Period
 from amaranth.lib import data, stream, enum, wiring
 from amaranth.lib.fifo import SyncFIFOBuffered
 from amaranth.lib.wiring import Component, In, Out
-from amaranth.back.verilog import convert
 
 # NUM_PER_SIDE = 2
 # NUM_LOCAL = NUM_PER_SIDE
@@ -17,44 +17,59 @@ from amaranth.back.verilog import convert
 # ARQ has 1 byte overhead (for SEQ), UT has 1 byte overhead (for ix), so
 # lets say flit size is 16 bytes
 
-FLIT_SIZE = 16 * 8
-COORD_BITS = 8
-INPUT_CHANNEL_FIFO_DEPTH = 2
 
-# class FlitKind(enum.Enum):
-#     Start = 0
-#     End = auto()
-#     Payload = auto()
-#     StartAndEnd = auto()
-
+class Config:
+    FLIT_SIZE = 16 * 4
+    COORD_BITS = 8
+    INPUT_CHANNEL_FIFO_DEPTH = 2
 
 class Coordinate(data.Struct):
-    x_coord: COORD_BITS
-    y_coord: COORD_BITS
+    x_coord: Config.COORD_BITS
+    y_coord: Config.COORD_BITS
 
 
 class FlitStart(data.Struct):
     target: Coordinate
-    payload: FLIT_SIZE - Coordinate.as_shape().size
+    payload: Config.FLIT_SIZE - Coordinate.as_shape().size
 
 class FlitPayload(data.Struct):
-    payload: FLIT_SIZE
+    payload: Config.FLIT_SIZE
 
-class FlitEnd(data.Struct):
-    payload: FLIT_SIZE
+class FlitTail(data.Struct):
+    payload: Config.FLIT_SIZE
 
 class FlitStartAndEnd(data.Struct):
     target: Coordinate
-    payload: FLIT_SIZE - Coordinate.as_shape().size
+    payload: Config.FLIT_SIZE - Coordinate.as_shape().size
 
 class Flit(TaggedUnion):
     start: FlitStart
-    end: FlitEnd
+    tail: FlitTail
     payload: FlitPayload
     start_and_end: FlitStartAndEnd
 
-FlitStream = stream.Signature(Flit)
+    @staticmethod
+    def print(flit):
+        tag = flit.shape()["tag"].shape(flit.tag)
+        body = f"payload={flit.data.payload.payload}"
+        if tag in [Flit.start, Flit.start_and_end]:
+            f = flit.data.start_and_end
+            body = f"x={f.target.x_coord}, y={f.target.y_coord}, payload={f.payload}"
 
+        return f"Flit.{tag.name}({body})"
+
+    @staticmethod
+    def runtime_print(flit):
+        return SwitchValue(flit.tag, [
+            (Flit.start, flit.data.start),
+            (Flit.tail, flit.data.tail),
+            (Flit.payload, flit.data.payload),
+            (Flit.start_and_end, flit.data.start_and_end),
+        ])
+
+Config.ENCODED_FLIT_SIZE = data.Layout.cast(Flit).size
+
+FlitStream = stream.Signature(Flit)
 
 class Port(enum.Enum):
     Local = 0
@@ -121,7 +136,8 @@ class InputChannel(Component):
     route_computer_cfg: In(RouteComputerConfig)
 
     def __init__(self, name):
-        super().__init__(path=(name + "_input_channel",))
+        super().__init__()
+        # super().__init__(path=(name + "_input_channel",))
         self._name = name
 
     def _print(self, string, *args):
@@ -137,7 +153,7 @@ class InputChannel(Component):
 
         # flit_in = self.flit_in
         flit_in_before_fifo = self.flit_in
-        input_fifo = m.submodules.input_fifo = SyncFIFOBuffered(width=len(self.flit_in.payload.as_value()), depth=INPUT_CHANNEL_FIFO_DEPTH)
+        input_fifo = m.submodules.input_fifo = SyncFIFOBuffered(width=len(self.flit_in.payload.as_value()), depth=Config.INPUT_CHANNEL_FIFO_DEPTH)
         wiring.connect(m, wiring.flipped(flit_in_before_fifo), input_fifo.w_stream)
         flit_in = FlitStream.create(path=["flit_in_buffered"])
         wiring.connect(m, input_fifo.r_stream, wiring.flipped(flit_in))
@@ -159,11 +175,15 @@ class InputChannel(Component):
         with m.If(route_computer.result.ready & route_computer.result.valid):
             m.d.sync += target_port.eq(route_computer.result.payload)
 
+
+        # TODO(robin): runs into cxxrtl bug
+        # with m.If(flit_in.valid & flit_in.ready):
+        #     m.d.sync += self._print("read flit {}", flit_in.payload.data.start)
+
         with m.FSM():
             # TODO(robin): consider inserting a pipeline / buffer stage that takes in some flit_in
             with m.State("IDLE"):
                 with m.If(flit_in.valid): # this should always be a start or start_and_end flit
-                    m.d.sync += self._print("new input flit {}", flit_in.payload.data.start.target)
                     # m.d.comb += Assert(flit_in.payload.tag.matches(Flit.start, Flit.start_and_end))
 
                     with m.If(flit_in.payload.tag.matches(Flit.start, Flit.start_and_end)):
@@ -187,7 +207,7 @@ class InputChannel(Component):
                     flit_out.valid.eq(flit_in.valid)
                 ]
 
-                with m.If(flit_out.valid & flit_out.payload.flit.tag.matches(Flit.start_and_end, Flit.end)):
+                with m.If(flit_out.valid & flit_out.payload.flit.tag.matches(Flit.start_and_end, Flit.tail)):
                     m.d.comb += flit_out.payload.last.eq(1)
                     with m.If(flit_out.ready):
                         m.next = "IDLE"
@@ -263,10 +283,10 @@ class PacketizedStreamCrossbarOutput(Component):
                             self.output.p.eq(input.p.flit),
                         ]
 
-                    with m.If(input.valid & input.ready & input.payload.last):
-                        arbitrate_and_transfer()
-                        with m.Else():
-                            m.next = "IDLE"
+                        with m.If(input.valid & input.ready & input.payload.last):
+                            arbitrate_and_transfer()
+                            with m.Else():
+                                m.next = "IDLE"
 
         return m
 
@@ -318,28 +338,63 @@ class MemoryMappedRouter(Component):
 
     cfg: In(MemoryMappedRouterConfig)
 
+    def in_port(self, port: Port):
+        return getattr(self, f"{port.name.lower()}_in")
+
+    def out_port(self, port: Port):
+        return getattr(self, f"{port.name.lower()}_out")
+
+    def in_ports(self):
+        for port in Port.__members__.values():
+            yield self.in_port(port)
+
+    def out_ports(self):
+        for port in Port.__members__.values():
+            yield self.out_port(port)
+
+    def port_pairs(self):
+        for port in Port.__members__.values():
+            yield (self.in_port(port), self.out_port(port))
+
+    def port_name_pairs(self):
+        for port in Port.__members__.values():
+            yield (port.name.lower(), self.in_port(port), self.out_port(port))
 
     def elaborate(self, _):
         m = Module()
 
-        ports = Port.__members__.values()
         output_ports = {
-            port: getattr(self, f"{port.name.lower()}_out") for port in ports
+            port: self.out_port(port) for port in Port.__members__.values()
         }
         crossbar = m.submodules.crossbar = PacketizedStreamCrossbar(output_ports)
 
         # each input port gets a buffer, that stores the current flit we process and a route compute unit, that if a head flit is encountered figures out, where the packet is supposed to go
-        for port in ports:
-            port_name = port.name.lower()
-            channel = m.submodules[f"{port_name}_input_channel"] = InputChannel(port_name)
+        for (name, in_port, _) in self.port_name_pairs():
+            channel = m.submodules[f"{name}_input_channel"] = InputChannel(name)
             wiring.connect(m, wiring.flipped(channel.route_computer_cfg), wiring.flipped(self.cfg.route_computer_cfg))
-            wiring.connect(m, wiring.flipped(channel.cfg), wiring.flipped(getattr(self.cfg, f"{port_name}_cfg")))
-            port = getattr(self, f"{port_name}_in")
-            wiring.connect(m, channel.flit_in, wiring.flipped(port))
+            wiring.connect(m, wiring.flipped(channel.cfg), wiring.flipped(getattr(self.cfg, f"{name}_cfg")))
+            wiring.connect(m, channel.flit_in, wiring.flipped(in_port))
             crossbar.add_input(channel.flit_out)
 
         return m
 
+
+async def send_packet(ctx, port, target, n_payload):
+    tags = [Flit.start_and_end]
+    if n_payload > 1:
+        tags = [Flit.start] + [Flit.payload] * (n_payload - 2) + [Flit.tail]
+
+    ctx.set(port.valid, 1)
+    for i, tag in enumerate(tags):
+        ctx.set(port.payload.tag, tag)
+        if i == 0:
+            ctx.set(port.payload.data.start_and_end.payload, i)
+            ctx.set(port.payload.data.start_and_end.target.x_coord, target[0])
+            ctx.set(port.payload.data.start_and_end.target.y_coord, target[1])
+        else:
+            ctx.set(port.payload.data.payload.payload, i)
+        await ctx.tick().until(port.ready & port.valid)
+    ctx.set(port.valid, 0)
 
 
 if __name__ == "__main__":
@@ -373,34 +428,32 @@ if __name__ == "__main__":
 
     # comment in for more in depth checking (conflicting drivers)
     # convert(dut, ports=(routers[0][0].local_in.payload.as_value(),routers[0][0].local_in.valid,routers[0][0].local_in.ready))
+    # print(convert(routers[0][0]))
 
-    async def write_packets(ctx):
-        with ctx.critical():
-            await ctx.tick().repeat(2)
-            ctx.set(routers[0][0].local_in.payload.tag, Flit.start_and_end)
-            ctx.set(routers[0][0].local_in.payload.data.start_and_end.target.x_coord, 0)
-            ctx.set(routers[0][0].local_in.payload.data.start_and_end.target.y_coord, 0)
-            ctx.set(routers[0][0].local_in.payload.data.start_and_end.payload, -1)
-            ctx.set(routers[0][0].local_in.valid, 1)
-
-            await ctx.tick().until(routers[0][0].local_in.ready & routers[0][0].local_in.valid)
-            ctx.set(routers[0][0].local_in.valid, 0)
-            await ctx.tick().repeat(5)
-            await ctx.delay(Period(us=2))
+    def write_packets(port, target, len):
+        async def write_packet(ctx):
+            with ctx.critical():
+                await send_packet(ctx, port, target, len)
+        return write_packet
 
 
     def verify_packets(coord, router):
         async def verify(ctx):
-            ctx.set(router.local_out.ready, 1)
+            # ctx.set(router.local_out.ready, 0)
+            # ctx.set(router.west_out.ready, 0)
+            # ctx.set(router.east_out.ready, 0)
+            # ctx.set(router.north_out.ready, 0)
+            # ctx.set(router.south_out.ready, 0)
             while True:
                 flit, = await ctx.tick().sample(router.local_out.payload).until(router.local_out.ready & router.local_out.valid)
-                print(coord, "received flit with target", flit.data.start_and_end.target.x_coord, flit.data.start_and_end.target.y_coord)
+                print(coord, f"received flit {Flit.print(flit)}")
         return verify
 
 
     sim = Simulator(dut)
     sim.add_clock(Period(MHz=100))
-    sim.add_process(write_packets)
+    sim.add_process(write_packets(routers[0][0].local_in, (0, 0), 3))
+    sim.add_process(write_packets(routers[0][0].west_in, (1, 0), 3))
 
     for x, r in enumerate(routers):
         for y, router in enumerate(r):
