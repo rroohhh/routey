@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 
-from amaranth import Signal, ShapeCastable, Const, Shape, Module
+from amaranth import Signal, ShapeCastable, Const, Shape, Module, Format, Mux
 from amaranth.lib import data
-from amaranth.lib.data import View, StructLayout, UnionLayout
+from amaranth.lib.data import View, StructLayout, UnionLayout, Layout, Const as DataConst
 from amaranth.back.rtlil import convert
 import amaranth.lib.enum
 import contextlib
+import types
 
 class _TaggedUnionMeta(ShapeCastable, type):
     def __new__(metacls, name, bases, namespace):
@@ -33,7 +34,15 @@ class _TaggedUnionMeta(ShapeCastable, type):
                                     "a union class (specified: {})"
                                     .format(", ".join(default.keys())))
 
-            cls.__tag_layout = amaranth.lib.enum.Enum(name + "Tag", {key: i for i, key in enumerate(layout.keys())})
+
+            # TODO(robin): maybe switch back to functional API when it supports shape, or when it supports formatting in structs without shape0
+            # amaranth.lib.enum.Enum(name + "Tag", {key: i for i, key in enumerate(layout.keys())})
+
+            def populate(ns):
+                for i, key in enumerate(layout.keys()):
+                    ns[key] = i
+            tag_layout = types.new_class(name=name + "Tag", bases=(amaranth.lib.enum.Enum,), kwds={"shape":range(len(layout.keys()))}, exec_body=populate)
+            cls.__tag_layout = tag_layout
             cls.__field_layouts = layout
             cls.__layout  = StructLayout({
                 "tag": cls.__tag_layout,
@@ -56,11 +65,12 @@ class _TaggedUnionMeta(ShapeCastable, type):
         return super().__call__(cls, target)
 
     def const(cls, init):
-        if isinstance(init, Const):
+        if isinstance(init, DataConst):
             if Layout.cast(init.shape()) != Layout.cast(cls.__layout):
                 raise ValueError(f"Const layout {init.shape()!r} differs from shape layout "
                                  f"{cls.__layout!r}")
             return init
+        # print(init, isinstance(init, Const), type(init))
         if init is not None and len(init) > 1:
             raise ValueError("Initializer for at most one field can be provided for "
                                 "a union class (specified: {})"
@@ -74,8 +84,32 @@ class _TaggedUnionMeta(ShapeCastable, type):
     def from_bits(cls, bits):
         return cls.as_shape().from_bits(bits)
 
+    # TODO(robin): this is extremely hacky, but works for now
     def format(cls, value, format_spec):
-        return cls.__layout.format(value, format_spec)
+        def str_val(s):
+            s = s.encode()
+            return Const(int.from_bytes(s, "little"), len(s) * 8)
+
+        tags = cls.__tag_layout.__members__
+        member_formats = {field: Format("{}", value.data[field]) for field in cls.__field_layouts.keys()}
+
+        total_format = Format("{}", value.tag)
+        scrub_out = 0
+        for key, fmt in member_formats.items():
+            tag_value = tags[key]
+            is_selected = value.tag == tag_value
+            new_fmt = Format("")
+            for chunk in fmt._chunks:
+                if isinstance(chunk, str):
+                    new_fmt += Format("{:s}", Mux(is_selected, str_val(chunk), str_val("")))
+                else:
+                    chunk_value, spec = chunk
+                    zero_width = len(format(0, spec))
+                    new_fmt += Format("{:" + spec + "}", Mux(is_selected, chunk_value, 0))
+                    new_fmt += Format("{:s}", Mux(is_selected, str_val(""), str_val("\x08" * zero_width)))
+                    scrub_out = max(scrub_out, zero_width)
+            total_format += new_fmt
+        return total_format + Format(" " * scrub_out)
 
     def _value_repr(cls, value):
         return cls.__layout._value_repr(value)

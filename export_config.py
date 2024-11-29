@@ -30,12 +30,23 @@ def export_config_sv(config):
     generated += f"endpackage\n"
     print(generated)
 
+def export_config_cpp(config):
+    p_name = package_name(config)
+    generated = f"namespace {p_name} {{\n"
+    for name, item in config_items(config).items():
+        assert isinstance(item, int)
+        generated += f"{indent}constexpr int {name} = {item};\n"
+    generated += f"}}\n"
+    print(generated)
+
 def export_config(flavor, config):
     match flavor:
         case "vhdl":
             export_config_vhdl(config)
         case "sv":
             export_config_sv(config)
+        case "cpp":
+            export_config_cpp(config)
         case _:
             assert False
 

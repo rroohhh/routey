@@ -1,12 +1,27 @@
 #!/usr/bin/env python3
 
 from .tagged_union import *
-from amaranth import Signal, Mux, Print, Format
+from .format_utils import *
+from amaranth import Signal, Mux, Print, Format, unsigned, Value, Array, Fragment
 from amaranth.hdl._ast import SwitchValue
 from amaranth.sim import Simulator, Period
 from amaranth.lib import data, stream, enum, wiring
-from amaranth.lib.fifo import SyncFIFOBuffered
+from amaranth.lib.fifo import SyncFIFO as SyncFIFOAmaranth
 from amaranth.lib.wiring import Component, In, Out
+
+class SyncFIFO(SyncFIFOAmaranth):
+    def elaborate(self, plat):
+        if self.depth == 0:
+            m = Module()
+            m.d.comb += [
+                self.w_stream.ready.eq(self.r_stream.ready),
+                self.r_stream.p.eq(self.w_stream.p),
+                self.r_stream.valid.eq(self.w_stream.valid)
+            ]
+            return m
+        else:
+            return super().elaborate(plat)
+
 
 # NUM_PER_SIDE = 2
 # NUM_LOCAL = NUM_PER_SIDE
@@ -19,13 +34,19 @@ from amaranth.lib.wiring import Component, In, Out
 
 
 class Config:
-    FLIT_SIZE = 16 * 4
+    LINK_BITS = 20
+    MUX_COUNT = 4
     COORD_BITS = 8
+    # minus three for id bits, minus 1 byte for seq minus 1 byte for crc
+    FLIT_SIZE = MUX_COUNT * LINK_BITS - 3 - 8
     INPUT_CHANNEL_FIFO_DEPTH = 2
+    INPUT_CHANNEL_OUTPUT_FIFO_DEPTH = 0
+    INPUT_CHANNEL_ROUTE_PIPELINE_DEPTH = 2
+    CROSSBAR_OUTPUT_FIFO_DEPTH = 0
 
 class Coordinate(data.Struct):
-    x_coord: Config.COORD_BITS
-    y_coord: Config.COORD_BITS
+    x: Config.COORD_BITS
+    y: Config.COORD_BITS
 
 
 class FlitStart(data.Struct):
@@ -42,41 +63,34 @@ class FlitStartAndEnd(data.Struct):
     target: Coordinate
     payload: Config.FLIT_SIZE - Coordinate.as_shape().size
 
+# this should never enter the router, it is used for arq internal signaling
+class FlitARQ(data.Struct):
+    payload: Config.FLIT_SIZE
+
 class Flit(TaggedUnion):
     start: FlitStart
     tail: FlitTail
     payload: FlitPayload
     start_and_end: FlitStartAndEnd
+    arq: FlitARQ
 
-    @staticmethod
-    def print(flit):
-        tag = flit.shape()["tag"].shape(flit.tag)
-        body = f"payload={flit.data.payload.payload}"
-        if tag in [Flit.start, Flit.start_and_end]:
-            f = flit.data.start_and_end
-            body = f"x={f.target.x_coord}, y={f.target.y_coord}, payload={f.payload}"
+    def is_last(self):
+        return self.tag.matches(Flit.start_and_end, Flit.tail)
 
-        return f"Flit.{tag.name}({body})"
-
-    @staticmethod
-    def runtime_print(flit):
-        return SwitchValue(flit.tag, [
-            (Flit.start, flit.data.start),
-            (Flit.tail, flit.data.tail),
-            (Flit.payload, flit.data.payload),
-            (Flit.start_and_end, flit.data.start_and_end),
-        ])
+    def is_head(self):
+        return self.tag.matches(Flit.start_and_end, Flit.start)
 
 Config.ENCODED_FLIT_SIZE = data.Layout.cast(Flit).size
 
 FlitStream = stream.Signature(Flit)
 
-class Port(enum.Enum):
-    Local = 0
-    North = enum.auto()
-    South = enum.auto()
-    East = enum.auto()
-    West = enum.auto()
+# TODO(robin): remove shape again
+class Port(enum.Enum, shape=unsigned(3)):
+    local = 0
+    north = enum.auto()
+    south = enum.auto()
+    east = enum.auto()
+    west = enum.auto()
 
 
 RouteComputerConfig = wiring.Signature({
@@ -102,18 +116,18 @@ class RouteComputer(Component):
         m.d.comb += self.input.ready.eq(self.result.ready)
         m.d.comb += self.result.valid.eq(self.input.valid)
 
-        input_x_coord = self.input.payload.x_coord
-        input_y_coord = self.input.payload.y_coord
-        my_x_coord = self.cfg.position.x_coord
-        my_y_coord = self.cfg.position.y_coord
+        input_x = self.input.payload.x
+        input_y = self.input.payload.y
+        my_x = self.cfg.position.x
+        my_y = self.cfg.position.y
         res = self.result.payload
 
-        with m.If(input_x_coord != my_x_coord):
-            m.d.comb += res.eq(Mux(input_x_coord > my_x_coord, Port.East, Port.West))
-        with m.Elif(input_y_coord != my_y_coord):
-            m.d.comb += res.eq(Mux(input_y_coord > my_y_coord, Port.South, Port.North))
+        with m.If(input_x != my_x):
+            m.d.comb += res.eq(Mux(input_x > my_x, Port.east, Port.west))
+        with m.Elif(input_y != my_y):
+            m.d.comb += res.eq(Mux(input_y > my_y, Port.south, Port.north))
         with m.Else():
-            m.d.comb += res.eq(Port.Local)
+            m.d.comb += res.eq(Port.local)
 
         return m
 
@@ -121,14 +135,16 @@ class RouteComputer(Component):
 COUNTER_SIZE = 32
 
 class RoutedFlit(data.Struct):
+    flit: Flit
     last: 1
     target: Port
-    flit: Flit
 
 InputChannelConfig = wiring.Signature({
     "invalid_flit_ctr": Out(COUNTER_SIZE)
 })
 
+# assumes clean input
+# TODO(robin): input cleaner
 class InputChannel(Component):
     flit_in: In(FlitStream)
     flit_out: In(stream.Signature(RoutedFlit))
@@ -141,7 +157,7 @@ class InputChannel(Component):
         self._name = name
 
     def _print(self, string, *args):
-        args = f"{{}}, {{}}: {self.__class__.__name__}/{self._name}: {string}", self.route_computer_cfg.position.x_coord, self.route_computer_cfg.position.y_coord, *args
+        args = f"{{}}, {{}}: {self.__class__.__name__}/{self._name}: {string}", self.route_computer_cfg.position.x, self.route_computer_cfg.position.y, *args
         return Print(Format(*args))
 
     def elaborate(self, _):
@@ -151,66 +167,71 @@ class InputChannel(Component):
 
         flit_out = self.flit_out
 
-        # flit_in = self.flit_in
         flit_in_before_fifo = self.flit_in
-        input_fifo = m.submodules.input_fifo = SyncFIFOBuffered(width=len(self.flit_in.payload.as_value()), depth=Config.INPUT_CHANNEL_FIFO_DEPTH)
-        wiring.connect(m, wiring.flipped(flit_in_before_fifo), input_fifo.w_stream)
+        input_fifo = m.submodules.input_fifo = SyncFIFO(width=len(self.flit_in.payload.as_value()), depth=Config.INPUT_CHANNEL_FIFO_DEPTH)
+
+        # we do not need to wait for the route computer if the next flit wont have routing information
+        # this is the case if the previous flit was the last flit of a packet, so the next one will have to have routing info
+
+        need_to_wait_for_route_computer = Signal(reset=1)
+        with m.If(flit_in_before_fifo.ready & flit_in_before_fifo.valid):
+            m.d.sync += need_to_wait_for_route_computer.eq(flit_in_before_fifo.p.is_last())
+
+        waiting_for_route_computer = Signal()
+        m.d.comb += [
+            # flit_in_before_fifo.ready.eq(input_fifo.w_stream.ready & (~waiting_for_route_computer | ~flit_in_before_fifo.p.is_head())),
+            flit_in_before_fifo.ready.eq(input_fifo.w_stream.ready & (~waiting_for_route_computer | ~need_to_wait_for_route_computer)),
+            input_fifo.w_stream.valid.eq(flit_in_before_fifo.valid),
+            input_fifo.w_stream.p.eq(flit_in_before_fifo.p)
+        ]
         flit_in = FlitStream.create(path=["flit_in_buffered"])
         wiring.connect(m, input_fifo.r_stream, wiring.flipped(flit_in))
 
-
-        cfg = self.cfg
+        # cfg = self.cfg
 
         # start and start_and_end have the same layout, so this is always valid
-        m.d.comb += route_computer.input.payload.eq(flit_in.payload.data.start.target)
+        m.d.comb += route_computer.input.payload.eq(flit_in_before_fifo.payload.data.start.target)
 
-        target_port = Signal(Port)
+        # new = Signal(reset = 1)
+        # with m.If(input_fifo.w_stream.valid):
+        #     with m.If(~input_fifo.w_stream.ready & route_computer.input.ready):
+        #         m.d.sync += new.eq(0)
+        #     with m.Else():
+        #         m.d.sync += new.eq(1)
+            # m.d.sync += new.eq(input_fifo.w_stream.ready | ~route_computer.input.ready)
+        with m.FSM(name="route_computer_fsm"):
+            with m.State("idle"):
+                with m.If(input_fifo.w_stream.valid & flit_in_before_fifo.p.is_head()):
+                    m.d.comb += route_computer.input.valid.eq(1)
+                    with m.If(route_computer.input.ready):
+                        m.d.comb += waiting_for_route_computer.eq(0)
+                        with m.If(~input_fifo.w_stream.ready):
+                            m.next = "wait_for_new"
+                    with m.Else():
+                        m.d.comb += waiting_for_route_computer.eq(1)
+            with m.State("wait_for_new"):
+                with m.If(input_fifo.w_stream.valid & input_fifo.w_stream.ready):
+                    m.next = "idle"
+                    #         m.next = "idle"
+                    #     with m.Else():
+                    # with m.Else():
+                    #     m.next = "wait_for_route"
+
+        # m.d.comb += route_computer.input.valid.eq( & input_fifo.w_stream.valid & flit_in_before_fifo.p.is_head())
+
+        port_buffer = m.submodules.target_port_fifo = SyncFIFO(width=len(Signal(Port).as_value()), depth=Config.INPUT_CHANNEL_ROUTE_PIPELINE_DEPTH)
+        wiring.connect(m, route_computer.result, port_buffer.w_stream)
+        route_result = stream.Signature(Port).create(path=["route_result"])
+        wiring.connect(m, port_buffer.r_stream, wiring.flipped(route_result))
 
         m.d.comb += [
-            flit_out.payload.flit.eq(flit_in.payload),
-            flit_out.payload.target.eq(target_port),
+            flit_in.ready.eq(flit_out.ready & flit_out.valid),
+            flit_out.p.flit.eq(flit_in.payload),
+            flit_out.p.target.eq(route_result.p),
+            flit_out.p.last.eq(flit_out.p.flit.is_last()),
+            flit_out.valid.eq(flit_in.valid & route_result.valid),
+            route_result.ready.eq(flit_out.ready & flit_out.valid & flit_out.p.flit.is_last())
         ]
-
-        m.d.comb += route_computer.result.ready.eq(1)
-        with m.If(route_computer.result.ready & route_computer.result.valid):
-            m.d.sync += target_port.eq(route_computer.result.payload)
-
-
-        # TODO(robin): runs into cxxrtl bug
-        # with m.If(flit_in.valid & flit_in.ready):
-        #     m.d.sync += self._print("read flit {}", flit_in.payload.data.start)
-
-        with m.FSM():
-            # TODO(robin): consider inserting a pipeline / buffer stage that takes in some flit_in
-            with m.State("IDLE"):
-                with m.If(flit_in.valid): # this should always be a start or start_and_end flit
-                    # m.d.comb += Assert(flit_in.payload.tag.matches(Flit.start, Flit.start_and_end))
-
-                    with m.If(flit_in.payload.tag.matches(Flit.start, Flit.start_and_end)):
-                        m.d.comb += route_computer.input.valid.eq(1)
-                    with m.Else(): # drop this flit, we have no way to route it, as we never received a corresponding start flit
-                        m.d.sync += cfg.invalid_flit_ctr.eq(cfg.invalid_flit_ctr + 1)
-                        m.d.comb += flit_in.ready.eq(1)
-
-                    # shortcut for combinatorial route computer
-                    with m.If(route_computer.result.ready & route_computer.result.valid):
-                        m.next = "ALLOCATED"
-                    with m.Else():
-                        m.next = "WAITING_FOR_ROUTE"
-            with m.State("WAITING_FOR_ROUTE"):
-                m.d.comb += route_computer.input.valid.eq(1)
-                with m.If(route_computer.result.ready & route_computer.result.valid):
-                    m.next = "ALLOCATED"
-            with m.State("ALLOCATED"):
-                m.d.comb += [
-                    flit_in.ready.eq(flit_out.ready),
-                    flit_out.valid.eq(flit_in.valid)
-                ]
-
-                with m.If(flit_out.valid & flit_out.payload.flit.tag.matches(Flit.start_and_end, Flit.tail)):
-                    m.d.comb += flit_out.payload.last.eq(1)
-                    with m.If(flit_out.ready):
-                        m.next = "IDLE"
 
         return m
 
@@ -220,22 +241,28 @@ class RoundRobinArbiter(Component):
         super().__init__({
             "requests": In(num_clients),
             "next": In(1),
+            "grant_store": Out(range(num_clients)),
             "grant": Out(range(num_clients)),
         })
 
     def elaborate(self, _):
         m = Module()
 
+        with m.Switch(self.grant_store):
+            for i in range(len(self.requests)):
+                with m.Case(i):
+                    for pred in reversed(range(i)):
+                        with m.If(self.requests[pred]):
+                            m.d.comb += self.grant.eq(pred)
+                    for succ in reversed(range(i + 1, len(self.requests))):
+                        with m.If(self.requests[succ]):
+                            m.d.comb += self.grant.eq(succ)
+
+                    with m.If(self.requests[i]):
+                        m.d.comb += self.grant.eq(i)
+
         with m.If(self.next):
-            with m.Switch(self.grant):
-                for i in range(len(self.requests)):
-                    with m.Case(i):
-                        for pred in reversed(range(i)):
-                            with m.If(self.requests[pred]):
-                                m.d.sync += self.grant.eq(pred)
-                        for succ in reversed(range(i + 1, len(self.requests))):
-                            with m.If(self.requests[succ]):
-                                m.d.sync += self.grant.eq(succ)
+            m.d.sync += self.grant_store.eq(self.grant)
 
         return m
 # think about making this more async, by having a target and a data stream, like axi does
@@ -256,40 +283,130 @@ class PacketizedStreamCrossbarOutput(Component):
 
         arbiter = m.submodules.arbiter = RoundRobinArbiter(len(inputs))
 
+
+        # output_register = Signal.like(self._inputs[0].p.flit)
+        # output_register_valid = Signal()
+        # output_register_last = Signal()
+
+        # with m.FSM("arbiter_fsm"):
+        #     with m.State("IDLE"):
+        #         # arbitrate
+        #     with m.State("DURING_PACKET"):
+
+
         # this is used to mask out the input stream that is currently transferred
         # because this is a round robin arbiter, we should not really select the same input stream twice back to back anyways
         mask = Signal.like(arbiter.requests)
-
-        def arbitrate_and_transfer():
-            with m.If(arbiter.requests != 0):
-                m.d.comb += arbiter.next.eq(1)
-                m.next = "TRANSFER"
-
         for i, input in enumerate(inputs):
             m.d.comb += arbiter.requests[i].eq(input.valid & (input.payload.target == target) & ~mask[i])
 
+
+        # with m.FSM():
+        #     with m.State("IDLE"):
+        #         with m.If(arbiter.requests != 0):
+        #             m.d.comb += arbiter.next.eq(1)
+        #             m.next = "TRANSFER"
+        #     with m.State("TRANSFER"):
+        #         selected = Array(self._inputs)[arbiter.grant]
+
+        #         with m.If(selected.valid & selected.ready):
+        #             m.d.sync += output_register.eq(selected.p.flit)
+        #             m.d.sync += output_register_last.eq(selected.p.last)
+        #             m.d.sync += output_register_valid.eq(1)
+        #         with m.Elif(~selected.valid & self.output.valid & self.output.ready):
+        #             m.d.sync += output_register_valid.eq(0)
+        #         can_read = ~output_register_valid | self.output.ready
+        #         m.d.comb += self.input_ready.bit_select(arbiter.grant, 1).eq(can_read)
+
+        #         with m.If(selected.p.last & can_read):
+        #             m.next = "TRANSFER_LAST"
+        #     with m.State("TRANSFER_LAST"):
+        #         with m.If(self.output.ready & self.output.valid):
+        #             m.d.sync += output_register_valid.eq(0)
+        #             m.d.sync += output_register_last.eq(0)
+        #             with m.If(arbiter.requests != 0):
+        #                 m.d.comb += arbiter.next.eq(1)
+        #                 m.next = "TRANSFER"
+        #             with m.Else():
+        #                 m.next = "IDLE"
+
+        target = Signal.like(arbiter.grant)
+        transfer = Signal()
+        selected = Array(self._inputs)[target]
+
+        with m.If(transfer):
+            m.d.comb += [
+                self.output.valid.eq(selected.valid),
+                self.output.p.eq(selected.p.flit),
+                self.input_ready.bit_select(target, 1).eq(self.output.ready)
+            ]
+
         with m.FSM():
             with m.State("IDLE"):
-                arbitrate_and_transfer()
-
+                with m.If(arbiter.requests != 0):
+                    m.d.comb += [
+                        arbiter.next.eq(1),
+                        target.eq(arbiter.grant),
+                        transfer.eq(1)
+                    ]
+                    with m.If(self.output.valid & self.output.ready):
+                        with m.If(selected.p.last):
+                            m.next = "IDLE"
+                        with m.Else():
+                            m.next = "TRANSFER"
             with m.State("TRANSFER"):
-                m.d.comb += mask.eq(1 << arbiter.grant)
+                    m.d.comb += [
+                        target.eq(arbiter.grant_store),
+                        transfer.eq(1)
+                    ]
+                    with m.If(self.output.valid & self.output.ready):
+                        with m.If(selected.p.last):
+                            m.next = "IDLE"
+                        with m.Else():
+                            m.next = "TRANSFER"
 
-                for i, input in enumerate(inputs):
-                    with m.If(i == arbiter.grant):
-                        m.d.comb += [
-                            self.input_ready[i].eq(self.output.ready),
-                            self.output.valid.eq(input.valid),
-                            self.output.p.eq(input.p.flit),
-                        ]
 
-                        with m.If(input.valid & input.ready & input.payload.last):
-                            arbitrate_and_transfer()
-                            with m.Else():
-                                m.next = "IDLE"
+#         def arbitrate_and_transfer():
+#             with m.If(arbiter.requests != 0):
+#                 m.d.comb += arbiter.next.eq(1)
+#                 m.next = "TRANSFER"
+
+# one latency:
+        # def arbitrate_and_transfer():
+        #     with m.If(arbiter.requests != 0):
+        #         m.d.comb += arbiter.next.eq(1)
+        #         m.next = "TRANSFER"
+
+        # with m.FSM():
+        #     with m.State("IDLE"):
+        #         arbitrate_and_transfer()
+
+        #     with m.State("TRANSFER"):
+        #         m.d.comb += mask.eq(1 << arbiter.grant_store)
+
+        #         # selected = Array(self._inputs)[arbiter.grant_store]
+        #         for i, input in enumerate(inputs):
+        #             with m.If(i == arbiter.grant_store):
+        #                 m.d.comb += [
+        #                     self.input_ready[i].eq(self.output.ready),
+        #                     self.output.valid.eq(input.valid),
+        #                     self.output.p.eq(input.p.flit),
+        #                 ]
+
+        #                 with m.If(input.valid & input.ready & input.payload.last):
+        #                     arbitrate_and_transfer()
+        #                     with m.Else():
+        #                         m.next = "IDLE"
+
+        # m.d.comb += [
+        #     self.output.valid.eq(output_register_valid),
+        #     self.output.p.eq(output_register)
+        # ]
 
         return m
 
+# TODO(robin): reduce connections if XY routing is used
+# (is there a sat way to figure out all the possible turns?)
 class PacketizedStreamCrossbar(Component):
     def __init__(self, outputs: dict[enum.Enum, stream.Signature]):
         self.outputs = outputs
@@ -317,7 +434,7 @@ class PacketizedStreamCrossbar(Component):
 
 MemoryMappedRouterConfig = wiring.Signature({
     "route_computer_cfg": In(RouteComputerConfig),
-    **{f"{port.name.lower()}_cfg": In(InputChannelConfig) for port in Port.__members__.values()}
+    **{f"{port.lower()}_cfg": In(InputChannelConfig) for port in Port.__members__.keys()}
 })
 
 # requirments for this router:
@@ -363,10 +480,17 @@ class MemoryMappedRouter(Component):
     def elaborate(self, _):
         m = Module()
 
-        output_ports = {
-            port: self.out_port(port) for port in Port.__members__.values()
-        }
+        output_ports = {}
+        for name, _, out_port in self.port_name_pairs():
+            crossbar_out = FlitStream.create(path=[f"{name}_flit_out_buffered"])
+            output_ports[Port[name]] = crossbar_out
+
+            buffer = m.submodules[f"{name}_crossbar_output_fifo"] = SyncFIFO(width=len(crossbar_out.p.as_value()), depth=Config.CROSSBAR_OUTPUT_FIFO_DEPTH)
+            wiring.connect(m, crossbar_out, buffer.w_stream)
+            wiring.connect(m, buffer.r_stream, wiring.flipped(out_port))
+
         crossbar = m.submodules.crossbar = PacketizedStreamCrossbar(output_ports)
+
 
         # each input port gets a buffer, that stores the current flit we process and a route compute unit, that if a head flit is encountered figures out, where the packet is supposed to go
         for (name, in_port, _) in self.port_name_pairs():
@@ -374,10 +498,22 @@ class MemoryMappedRouter(Component):
             wiring.connect(m, wiring.flipped(channel.route_computer_cfg), wiring.flipped(self.cfg.route_computer_cfg))
             wiring.connect(m, wiring.flipped(channel.cfg), wiring.flipped(getattr(self.cfg, f"{name}_cfg")))
             wiring.connect(m, channel.flit_in, wiring.flipped(in_port))
-            crossbar.add_input(channel.flit_out)
 
-        return m
+            buffer = m.submodules[f"{name}_input_channel_output_fifo"] = SyncFIFO(width=len(channel.flit_out.p.as_value()), depth=Config.INPUT_CHANNEL_OUTPUT_FIFO_DEPTH)
+            flit_out = stream.Signature(RoutedFlit).create(path=[f"{name}_flit_out_buffered"])
 
+            wiring.connect(m, wiring.flipped(channel.flit_out), buffer.w_stream)
+            wiring.connect(m, buffer.r_stream, wiring.flipped(flit_out))
+            crossbar.add_input(flit_out)
+
+        Value.cast(self.local_in.payload).attrs["debug_item"] = 1
+        self.local_in.ready.attrs["debug_item"] = 1
+        self.local_in.valid.attrs["debug_item"] = 1
+        Value.cast(self.local_out.payload).attrs["debug_item"] = 1
+        self.local_out.ready.attrs["debug_item"] = 1
+        self.local_out.valid.attrs["debug_item"] = 1
+
+        return add_formatting_attrs(m)
 
 async def send_packet(ctx, port, target, n_payload):
     tags = [Flit.start_and_end]
@@ -389,8 +525,8 @@ async def send_packet(ctx, port, target, n_payload):
         ctx.set(port.payload.tag, tag)
         if i == 0:
             ctx.set(port.payload.data.start_and_end.payload, i)
-            ctx.set(port.payload.data.start_and_end.target.x_coord, target[0])
-            ctx.set(port.payload.data.start_and_end.target.y_coord, target[1])
+            ctx.set(port.payload.data.start_and_end.target.x, target[0])
+            ctx.set(port.payload.data.start_and_end.target.y, target[1])
         else:
             ctx.set(port.payload.data.payload.payload, i)
         await ctx.tick().until(port.ready & port.valid)
@@ -408,8 +544,8 @@ if __name__ == "__main__":
         for y in range(grid_size):
             router = m.submodules[f"router_{x}_{y}"] = routers[x][y]
             m.d.comb += [
-                router.cfg.route_computer_cfg.position.x_coord.eq(x),
-                router.cfg.route_computer_cfg.position.y_coord.eq(y)
+                router.cfg.route_computer_cfg.position.x.eq(x),
+                router.cfg.route_computer_cfg.position.y.eq(y)
             ]
             routers[x][y] = router
 
@@ -434,12 +570,14 @@ if __name__ == "__main__":
         async def write_packet(ctx):
             with ctx.critical():
                 await send_packet(ctx, port, target, len)
+                await send_packet(ctx, port, target, len)
+                await send_packet(ctx, port, target, len)
         return write_packet
 
 
     def verify_packets(coord, router):
         async def verify(ctx):
-            # ctx.set(router.local_out.ready, 0)
+            ctx.set(router.local_out.ready, 1)
             # ctx.set(router.west_out.ready, 0)
             # ctx.set(router.east_out.ready, 0)
             # ctx.set(router.north_out.ready, 0)
@@ -452,12 +590,12 @@ if __name__ == "__main__":
 
     sim = Simulator(dut)
     sim.add_clock(Period(MHz=100))
-    sim.add_process(write_packets(routers[0][0].local_in, (0, 0), 3))
-    sim.add_process(write_packets(routers[0][0].west_in, (1, 0), 3))
+    sim.add_process(write_packets(routers[0][0].local_in, (0, 0), 1))
+    # sim.add_process(write_packets(routers[0][0].west_in, (1, 0), 3))
 
     for x, r in enumerate(routers):
         for y, router in enumerate(r):
             sim.add_process(verify_packets((x,y), router))
 
     with sim.write_vcd("test.vcd"):
-        sim.run_until(Period(MHz=100) * 100)
+        sim.run_until(Period(MHz=100) * 1000)

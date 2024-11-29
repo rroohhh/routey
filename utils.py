@@ -56,12 +56,13 @@ def assertFormal(spec, ports=None, mode="bmc", depth=1):
     else:
         script = ""
 
+
+    # wait on
+    # multiclock on
     config = textwrap.dedent("""\
     [options]
     mode {mode}
     depth {depth}
-    wait on
-    multiclock on
 
     [engines]
     {engine}

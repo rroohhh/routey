@@ -1,6 +1,6 @@
 # amaranth: UnusedElaboratable=no
 
-import re, enum
+import enum
 from collections import defaultdict
 from amaranth.lib import wiring, stream, data
 from amaranth import Shape, Value, Fragment, Elaboratable
@@ -63,7 +63,7 @@ def gen_types(tys):
                     assert False
 
             typedef += f"typedef {packed_type} packed {{\n"
-            for field_name, item in layout:
+            for field_name, item in list(layout)[::-1]:
                 ty = item.shape
                 type_name = type_to_name(ty, field_name=field_name, prefix=name)
                 typedef += f"{indent}{type_name} {field_name};\n"

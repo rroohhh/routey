@@ -10,7 +10,7 @@ from .memory_mapped_router import MemoryMappedRouter, Port, Flit, FlitStream, Co
 def get_router_ports(router: MemoryMappedRouter):
     ports = []
 
-    for (in_port, out_port) in router.port_pairs():
+    for (in_port, out_port) in list(router.port_pairs()):
         ports.append(in_port.ready)
         ports.append(in_port.valid)
         ports.append(in_port.p.as_value())
@@ -33,28 +33,34 @@ class ValidFlitStream(Component):
         m = Module()
         stream = self.stream
         last_tag = Signal.like(stream.p.tag)
-        with m.FSM():
+        last_data = Signal.like(stream.p)
+
+        with m.FSM(name="stream"):
+            with m.State("NO_DATA"):
+                with m.If(stream.valid & ~stream.ready):
+                    m.d.sync += last_data.eq(stream.p)
+                    m.next = "HAVE_DATA"
+            with m.State("HAVE_DATA"):
+                m.d.comb += c(stream.p == last_data)
+                with m.If(stream.valid & stream.ready):
+                    m.next = "NO_DATA"
+
+        with m.FSM(name="flit"):
             with m.State("IDLE"):
                 with m.If(stream.valid & stream.ready):
                     m.d.comb += [
-                        c(stream.p.tag != Flit.tail),
-                        c(stream.p.tag != Flit.payload),
+                        c(stream.p.is_head()),
                     ]
                     m.d.sync += last_tag.eq(stream.p.tag)
                     m.next = "HAVE_TAG"
             with m.State("HAVE_TAG"):
                 with m.If(stream.valid & stream.ready):
                     m.d.sync += last_tag.eq(stream.p.tag)
+                with m.If(stream.valid):
                     with m.If(last_tag.matches(Flit.start, Flit.payload)):
-                        m.d.comb += [
-                            c(stream.p.tag != Flit.start),
-                            c(stream.p.tag != Flit.start_and_end)
-                        ]
+                        m.d.comb += c((stream.p.tag == Flit.tail) | (stream.p.tag == Flit.payload))
                     with m.If(last_tag.matches(Flit.start_and_end, Flit.tail)):
-                        m.d.comb += [
-                            c(stream.p.tag != Flit.tail),
-                            c(stream.p.tag != Flit.payload)
-                        ]
+                        m.d.comb += c((stream.p.tag == Flit.start_and_end) | (stream.p.tag == Flit.start))
 
         return m
 
@@ -85,17 +91,20 @@ def test_routing():
                 ]
 
 
-            our_x = AnyConst(len(router.cfg.route_computer_cfg.position.x_coord))
-            our_y = AnyConst(len(router.cfg.route_computer_cfg.position.y_coord))
+            our_x = AnyConst(len(router.cfg.route_computer_cfg.position.x))
+            our_y = AnyConst(len(router.cfg.route_computer_cfg.position.y))
+            # our_x = 1
+            # our_y = 1
+
             m.d.comb += [
-                router.cfg.route_computer_cfg.position.x_coord.eq(our_x),
-                router.cfg.route_computer_cfg.position.y_coord.eq(our_y)
+                router.cfg.route_computer_cfg.position.x.eq(our_x),
+                router.cfg.route_computer_cfg.position.y.eq(our_y)
             ]
 
             with m.If(router.local_out.valid & router.local_out.ready & (router.local_out.p.tag.matches(Flit.start, Flit.start_and_end))):
                 m.d.comb += [
-                    Assert(router.local_out.p.data.start_and_end.target.x_coord == our_x),
-                    Assert(router.local_out.p.data.start_and_end.target.y_coord == our_y)
+                    Assert(router.local_out.p.data.start_and_end.target.x == our_x),
+                    Assert(router.local_out.p.data.start_and_end.target.y == our_y)
                 ]
 
             return m
@@ -139,11 +148,11 @@ def test_valid_flit_stream_out():
                     output_stream.stream.p.eq(out_port.p),
                 ]
 
-            our_x = AnyConst(len(router.cfg.route_computer_cfg.position.x_coord))
-            our_y = AnyConst(len(router.cfg.route_computer_cfg.position.y_coord))
+            our_x = AnyConst(len(router.cfg.route_computer_cfg.position.x))
+            our_y = AnyConst(len(router.cfg.route_computer_cfg.position.y))
             m.d.comb += [
-                router.cfg.route_computer_cfg.position.x_coord.eq(our_x),
-                router.cfg.route_computer_cfg.position.y_coord.eq(our_y)
+                router.cfg.route_computer_cfg.position.x.eq(our_x),
+                router.cfg.route_computer_cfg.position.y.eq(our_y)
             ]
 
             return m
@@ -170,12 +179,12 @@ def test_stream_contract_spec():
             m.domains += self.cd_sync
             m.submodules.dut = router = self.router
 
-            our_x = AnyConst(len(router.cfg.route_computer_cfg.position.x_coord))
-            our_y = AnyConst(len(router.cfg.route_computer_cfg.position.y_coord))
+            our_x = AnyConst(len(router.cfg.route_computer_cfg.position.x))
+            our_y = AnyConst(len(router.cfg.route_computer_cfg.position.y))
 
             m.d.comb += [
-                router.cfg.route_computer_cfg.position.x_coord.eq(our_x),
-                router.cfg.route_computer_cfg.position.y_coord.eq(our_y),
+                router.cfg.route_computer_cfg.position.x.eq(our_x),
+                router.cfg.route_computer_cfg.position.y.eq(our_y),
                 Assume(our_x > 0),
                 Assume(our_y > 0),
             ]
@@ -304,11 +313,11 @@ def test_flit_data_flow():
                     output_payload.stream.p.eq(out_port.p),
                 ]
 
-            # our_x = AnyConst(len(router.cfg.route_computer_cfg.position.x_coord))
-            # our_y = AnyConst(len(router.cfg.route_computer_cfg.position.y_coord))
+            our_x = AnyConst(len(router.cfg.route_computer_cfg.position.x))
+            our_y = AnyConst(len(router.cfg.route_computer_cfg.position.y))
             m.d.comb += [
-                router.cfg.route_computer_cfg.position.x_coord.eq(our_x),
-                router.cfg.route_computer_cfg.position.y_coord.eq(our_y)
+                router.cfg.route_computer_cfg.position.x.eq(our_x),
+                router.cfg.route_computer_cfg.position.y.eq(our_y)
             ]
 
             return m
@@ -437,8 +446,8 @@ def test_packet_data_flow():
             # target_y = 0
             target = Signal(Coordinate)
             m.d.comb += target.eq(target_const)
-            # m.d.comb += target.x_coord.eq(target_const.x_coord)
-            # m.d.comb += target.y_coord.eq(target_const.y_coord)
+            # m.d.comb += target.x.eq(target_const.x)
+            # m.d.comb += target.y.eq(target_const.y)
 
             for (name, in_port, out_port) in router.port_name_pairs():
                 my_port = getattr(Port, name.capitalize())
@@ -470,11 +479,11 @@ def test_packet_data_flow():
 
             our_x = 1
             our_y = 1
-            # our_x = AnyConst(len(router.cfg.route_computer_cfg.position.x_coord))
-            # our_y = AnyConst(len(router.cfg.route_computer_cfg.position.y_coord))
+            # our_x = AnyConst(len(router.cfg.route_computer_cfg.position.x))
+            # our_y = AnyConst(len(router.cfg.route_computer_cfg.position.y))
             m.d.comb += [
-                router.cfg.route_computer_cfg.position.x_coord.eq(our_x),
-                router.cfg.route_computer_cfg.position.y_coord.eq(our_y)
+                router.cfg.route_computer_cfg.position.x.eq(our_x),
+                router.cfg.route_computer_cfg.position.y.eq(our_y)
             ]
 
             return m
@@ -497,7 +506,7 @@ if __name__ == "__main__":
     print("start_and_end", Flit.start_and_end.value)
 
     test_routing()
-    # test_valid_flit_stream_out()
-    # test_stream_contract_spec()
-    # test_flit_ordering()
-    # test_packet_data_flow()
+    test_valid_flit_stream_out()
+    test_stream_contract_spec()
+    test_flit_data_flow()
+    test_packet_data_flow()

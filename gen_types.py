@@ -81,7 +81,25 @@ value<Bits> value_from_int(IntegerT i) {
             # typedef += f"auto operator<=>(const uint64_t& other) const {{ return v <=> other; }};\n"
             typedef += f"private:\n"
             typedef += f"{indent}Value v;\n"
+            typedef += f"{indent}friend struct std::formatter<{name}>;\n"
             typedef += f"}};"
+            typedef += f"""template<>
+struct std::formatter<{name}, char>
+{{
+    constexpr auto parse(std::format_parse_context& ctx) {{ return ctx.begin(); }}
+
+    template<class C>
+    auto format(const {name} & s, C& ctx) const
+    {{
+"""
+            for n in ty.__members__.keys():
+                typedef += f"{indent*2}if (s.v == {name}::{n}) return std::format_to(ctx.out(), \"{n}\");\n"
+
+            typedef += """
+    }
+};"""
+
+
         else:
             layout = data.Layout.cast(ty)
             is_packed_union = False
@@ -130,6 +148,8 @@ value<Bits> value_from_int(IntegerT i) {
             if packed_type == "struct" and not is_packed_union:
                 shape = Shape.cast(ty)
                 value_type = shape_to_value_type(shape)
+                typedef += f"auto operator<=>(const {name}&) const = default;\n"
+                # typedef += f"bool operator==(const {name}&) const = default;\n"
                 typedef += f"{indent}{name} & operator=(const {value_type} & val) {{\n"
                 member_inits = [f"{indent*2}{field_name} = {read_field(item)};\n" for field_name, item in layout]
                 typedef += "".join(member_inits)
@@ -161,15 +181,14 @@ value<Bits> value_from_int(IntegerT i) {
                 typedef += f"{indent*2}return result;\n"
                 typedef += f"{indent}}}\n"
 
-                # typedef += f"{indent}{name}(const {value_type} & val) {{\n"
-                # typedef += f"{indent*2}tag = {read_field(tag_field)};\n"
-                # typedef += f"{indent*2}switch(tag) {{\n"
-                # for tag, field in tag_field_list:
-                #     typedef += f"{indent*3}case {tag_type_name}::{tag.name}: {{ data.{tag.name} = {read_field(field)}; break; }}\n"
-                # typedef += f"{indent*3}default: std::unreachable();\n"
-                # typedef += f"{indent*2}}}\n"
-                # typedef += f"{indent*2}return result;\n"
-                # typedef += f"{indent}}}\n"
+                typedef += f"{indent}static std::variant<{', '.join(type_to_name(field.shape) for _, field in tag_field_list)}> decode(const {value_type} & val) {{\n"
+                typedef += f"{indent*2}{tag_type_name} tag = {read_field(tag_field)};\n"
+                typedef += f"{indent*2}switch(tag) {{\n"
+                for tag, field in tag_field_list:
+                    typedef += f"{indent*3}case {tag_type_name}::{tag.name}: {{ {type_to_name(field.shape)} v; v = {read_field(field)}; return {{v}}; }}\n"
+                typedef += f"{indent*3}default: std::unreachable();\n"
+                typedef += f"{indent*2}}}\n"
+                typedef += f"{indent}}}\n"
 
                 typedef += f"{indent}std::variant<{', '.join(type_to_name(field.shape) for _, field in tag_field_list)}> get() const {{\n"
                 typedef += f"{indent*2}switch(tag) {{\n"
@@ -181,6 +200,25 @@ value<Bits> value_from_int(IntegerT i) {
 
 
             typedef += f"}};"
+
+            if packed_type == "struct" and not is_packed_union:
+
+                typedef += f"""
+template<>
+struct std::formatter<{name}, char>
+{{
+    constexpr auto parse(std::format_parse_context& ctx) {{ return ctx.begin(); }}
+
+    auto format(const {name} & s, auto & ctx) const
+    {{
+"""
+                format = name + "{{" + ", ".join(field_name + "={}" for field_name, _ in layout) + "}}"
+                args = ", ".join("s." + n for n, _ in layout)
+                typedef += f"{indent*2}return std::format_to(ctx.out(), \"{format}\", {args});\n"
+
+                typedef += """
+    }
+};"""
 
         defined_types.add(typedef)
 

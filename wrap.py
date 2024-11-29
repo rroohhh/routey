@@ -17,7 +17,7 @@ class EqSet:
 
 
 def pascal_case_to_snake_case(name: str):
-    return re.sub(r"[A-Z]", lambda m: "_" + m.group(0).lower(), name).removeprefix("_")
+    return re.sub(r"[A-Z]+", lambda m: "_" + m.group(0).lower(), name).removeprefix("_")
 
 def path_to_name(path: list):
     return "_".join(path)
