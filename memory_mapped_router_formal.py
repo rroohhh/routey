@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 
-from amaranth import Module, Elaboratable, Assert, ClockDomain, Assume, Signal, Cover, Mux
+from amaranth import Module, Elaboratable, Assert, ClockDomain, Assume, Signal, Cover, Mux, Const, Cat
 from amaranth.lib import stream
+from amaranth.lib import wiring
 from amaranth.lib.wiring import Component, In
 from amaranth.asserts import AnyConst, Initial
-from .utils import assertFormal
-from .memory_mapped_router import MemoryMappedRouter, Port, Flit, FlitStream, Coordinate
+from formal_utils import FormalScoreboard
+from utils import assertFormal, AssertEventually, FormalVerificationFailed
+from memory_mapped_router import MemoryMappedRouter, Port, Flit, FlitStream, Coordinate, RoundRobinArbiter, RouteComputer
 
 def get_router_ports(router: MemoryMappedRouter):
     ports = []
@@ -23,9 +25,10 @@ def get_router_ports(router: MemoryMappedRouter):
 class ValidFlitStream(Component):
     stream: In(FlitStream)
 
-    def __init__(self, c=Assume):
+    def __init__(self, c=Assume, max_packet_len = None):
         super().__init__()
         self._cell = c
+        self._max_packet_len = max_packet_len
 
     def elaborate(self, _):
         c = self._cell
@@ -34,6 +37,23 @@ class ValidFlitStream(Component):
         stream = self.stream
         last_tag = Signal.like(stream.p.tag)
         last_data = Signal.like(stream.p)
+
+        packet_len = Signal(range(self._max_packet_len + 1))
+        with m.FSM(name="packet_len"):
+            with m.State("IDLE"):
+                with m.If(stream.valid & stream.ready):
+                    with m.If(stream.p.is_head()):
+                        m.d.sync += packet_len.eq(1)
+                        with m.If(stream.p.is_last()):
+                            m.next = "PACKET"
+            with m.State("PACKET"):
+                with m.If(stream.valid & stream.ready):
+                    m.d.sync += packet_len.eq(packet_len + 1)
+                    with m.If(stream.p.is_last()):
+                        m.next = "IDLE"
+
+        if ((max_len := self._max_packet_len) is not None):
+            m.d.comb += c(packet_len <= max_len)
 
         with m.FSM(name="stream"):
             with m.State("NO_DATA"):
@@ -330,6 +350,8 @@ def test_flit_data_flow():
     ], mode="prove", depth=20)
 
 
+
+
 # ordering rules:
 # on the same input port: packets to the same target are send out to the same port and ordered the same as the input
 #  - pick a source port, pick a target
@@ -452,6 +474,7 @@ def test_packet_data_flow():
             for (name, in_port, out_port) in router.port_name_pairs():
                 my_port = getattr(Port, name.capitalize())
                 input_stream = m.submodules[f"input_stream_{name}"] = ValidFlitStream(c=Assume)
+
                 input_payload = m.submodules[f"input_payload_{name}"] = PacketPayloadWolperColoring(c=Assume, my_port=my_port , src_port=src_port, target=target)
                 m.d.comb += [
                     input_stream.stream.ready.eq(in_port.ready),
@@ -495,18 +518,178 @@ def test_packet_data_flow():
         spec_contract.cd_sync.clk, spec_contract.cd_sync.rst
     ], mode="prove", depth=12)
 
+def test_round_robin_arbiter():
+    def build(k_bound, num_clients):
+        m = Module()
+        m.submodules.arbiter = arbiter = RoundRobinArbiter(num_clients)
+
+        for i in range(len(arbiter.requests)):
+            m.submodules[f"assert_{i}"] = a = AssertEventually(k_bound)
+            m.d.comb += [
+                a.request.eq(arbiter.requests[i]),
+                a.release.eq(Mux(arbiter.next, (arbiter.grant == i) & arbiter.next, arbiter.grant_store == i)),
+                a.tick.eq(arbiter.next)
+            ]
+
+            with m.FSM(name=f"valid_input_{i}_fsm"):
+                with m.State("IDLE"):
+                    with m.If(a.request & ~a.release):
+                        m.next = "WAIT_FOR_GRANT"
+                with m.State("WAIT_FOR_GRANT"):
+                    m.d.comb += Assume(a.request == 1)
+                    with m.If(a.release):
+                        m.next = "IDLE"
+
+        cd_sync = ClockDomain()
+        m.domains += cd_sync
+        return m, cd_sync, arbiter
+    # TODO(robin): increase this when we have bigger arbiters
+    for num_clients in range(2, 11):
+        # this bound specifies the maximum number of grants
+        # before the grant for this request is given
+        # For a round robin arbiter this should be the number of clients minus one
+        k_bound = num_clients - 1
+        m, cd_sync, arbiter = build(k_bound, num_clients)
+
+        assertFormal(m, [cd_sync.clk, cd_sync.rst, arbiter.requests, arbiter.next], mode="cover", depth=2*num_clients)
+        assertFormal(m, [cd_sync.clk, cd_sync.rst, arbiter.requests, arbiter.next], mode="prove")
+
+        ## this should fail, so it tests very the formal verification actually works
+        k_bound = num_clients - 2
+        m, cd_sync, arbiter = build(k_bound, num_clients)
+
+        try:
+            assertFormal(m, [cd_sync.clk, cd_sync.rst, arbiter.requests, arbiter.next], mode="prove")
+        except FormalVerificationFailed:
+            ...
+        except:
+            raise Exception("formal verification did unexpectedly not fail")
+
+def test_packet_data_flow_new():
+    class PacketDataflowSpec(Elaboratable):
+        def __init__(self, router):
+            self.router   = router
+            self.cd_sync = ClockDomain("sync")
+
+        def elaborate(self, _):
+            m = Module()
+
+            m.domains += self.cd_sync
+
+            m.submodules.dut = router = self.router
+
+
+            our_pos = AnyConst(Coordinate)
+            watched_port = AnyConst(Port)
+            watched_target = AnyConst(Coordinate)
+
+            # our_pos = Const.cast(Coordinate.const({ "x": 1, "y" : 1 }))
+            # watched_port = Const(Port.east)
+            # watched_target = Const.cast(Coordinate.const({ "x": 0, "y": 1 }))
+
+            watched_output_port = AnyConst(Port)
+
+            m.submodules.dummy_route_computer = dummy_rc = RouteComputer()
+
+            wiring.connect(m, wiring.flipped(dummy_rc.cfg), wiring.flipped(router.cfg.route_computer_cfg))
+            m.d.comb += [
+                dummy_rc.input.valid.eq(1),
+                dummy_rc.input.p.eq(watched_target),
+                dummy_rc.result.ready.eq(1)
+            ]
+
+            with m.If(dummy_rc.result.ready & dummy_rc.result.valid):
+                m.d.comb += Assume(dummy_rc.result.p.as_value() == watched_output_port)
+
+            def port_color(s):
+                return s.p.data.start.payload[-len(watched_port):]
+            def payload(s):
+                return Cat(s.p.tag, s.p.data.start.payload[:-len(watched_port)])
+                # return s.p.as_value()
+            # payload_port_color_slice = slice(-len(watched_port),)
+            # payload_port_rest_slice = slice(0,-len(watched_port))
+            m.submodules.checker = checker = FormalScoreboard(payload(router.local_in).shape())
+
+            for (name, in_port, out_port, port) in router.port_name_direction_pairs():
+                input_stream = m.submodules[f"input_stream_{name}"] = ValidFlitStream(c=Assume, max_packet_len=4)
+                m.d.comb += [
+                    input_stream.stream.ready.eq(in_port.ready),
+                    input_stream.stream.valid.eq(in_port.valid),
+                    input_stream.stream.p.eq(in_port.p),
+                ]
+
+                with m.If(in_port.valid):
+                    m.d.comb += Assume(port_color(in_port) == port)
+
+
+                input_target = Signal(Coordinate, name = f"input_target_{name}")
+                next_input_target = Mux(in_port.p.is_head() & in_port.valid & in_port.ready, in_port.p.data.start.target, input_target)
+                m.d.sync += input_target.eq(next_input_target)
+
+                output_target = Signal(Coordinate, name = f"output_target_{name}")
+                next_output_target = Mux(out_port.p.is_head() & out_port.valid & out_port.ready, out_port.p.data.start.target, output_target)
+                m.d.sync += output_target.eq(next_output_target)
+
+
+                with m.If(watched_port == port):
+                    m.d.comb += [
+                        checker.input.valid.eq((next_input_target == watched_target) & in_port.valid & in_port.ready),
+                        checker.input.p.eq(payload(in_port))
+                    ]
+
+                with m.If(watched_output_port == port):
+                    m.d.comb += [
+                        checker.output.valid.eq(
+                            (port_color(out_port) == watched_port) &
+                            (next_output_target == watched_target) &
+                            out_port.valid & out_port.ready),
+                        checker.output.p.eq(payload(out_port))
+                    ]
+
+
+            m.d.comb += [
+                router.cfg.route_computer_cfg.position.eq(our_pos),
+            ]
+
+            return m
+
+    dut = MemoryMappedRouter()
+    spec_contract = PacketDataflowSpec(dut)
+
+    assertFormal(spec_contract, [
+        *get_router_ports(dut),
+        spec_contract.cd_sync.clk, spec_contract.cd_sync.rst
+    ], mode="prove", depth=12)
+
+    assertFormal(spec_contract, [
+        *get_router_ports(dut),
+        spec_contract.cd_sync.clk, spec_contract.cd_sync.rst
+    ], mode="cover", depth=25)
+
+
 
 # do we want to prove some liveness guarantees?
 # -> can we prove deadlock freeness?
-
+#
+#
 if __name__ == "__main__":
     print("start", Flit.start.value)
     print("end", Flit.tail.value)
     print("payload", Flit.payload.value)
     print("start_and_end", Flit.start_and_end.value)
 
+    test_packet_data_flow_new()
+    print("test_packet_data_flow_new succeeded")
+
+    test_round_robin_arbiter()
+    print("test_round_robin_arbiter succeeded")
     test_routing()
+    print("test_routing succeeded")
     test_valid_flit_stream_out()
+    print("test_valid_flit_stream succeeded")
     test_stream_contract_spec()
+    print("test_stream_contract_spec succeeded")
     test_flit_data_flow()
+    print("test_flit_data_flow succeeded")
     test_packet_data_flow()
+    print("test_packet_data_flow succeeded")

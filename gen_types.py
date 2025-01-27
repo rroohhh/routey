@@ -4,7 +4,7 @@ import enum
 from inspect import isclass
 from amaranth import Shape, ShapeCastable
 from amaranth.lib import data
-from .tagged_union import TaggedUnion
+from tagged_union import TaggedUnion
 from .wrap import EqSet, type_to_name, indent, pascal_case_to_snake_case
 
 def shape_to_value_type(shape: Shape):
