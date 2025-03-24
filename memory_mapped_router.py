@@ -46,7 +46,7 @@ class Config:
     # COORD_BITS = 4
 
     # minus three for id bits, minus 1 byte for seq minus 1 byte for crc
-    FLIT_SIZE = MUX_COUNT * LINK_BITS - 3 - 8
+    FLIT_SIZE = MUX_COUNT * LINK_BITS - 3 - 8 - 8
     INPUT_CHANNEL_FIFO_DEPTH = 2
     INPUT_CHANNEL_OUTPUT_FIFO_DEPTH = 0
     INPUT_CHANNEL_ROUTE_PIPELINE_DEPTH = INPUT_CHANNEL_FIFO_DEPTH

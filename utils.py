@@ -56,8 +56,8 @@ def assertFormal(spec, ports=None, mode="bmc", depth=1, tmp = False):
         # print(target_dir, filename)
         engine = "smtbmc"
         if mode == "prove":
-            engine = "abc pdr\naiger rIC3"
-            # engine = "aiger rIC3"
+            #engine = "abc pdr\naiger rIC3"
+            engine = "aiger rIC3"
             # engine = "aiger imctk-eqy-engine --rarity-sim-rounds=20 --window-max=20"
             script = ""
         elif mode == "bmc":

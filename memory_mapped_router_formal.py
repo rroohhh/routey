@@ -5,7 +5,7 @@ from amaranth.lib import stream
 from amaranth.lib import wiring
 from amaranth.lib.wiring import Component, In
 from amaranth.asserts import AnyConst, Initial
-from formal_utils import FormalScoreboard
+from formal_utils import FormalScoreboard, FormalScoreboardWolper
 from utils import assertFormal, AssertEventually, FormalVerificationFailed
 from memory_mapped_router import MemoryMappedRouter, Port, Flit, FlitStream, Coordinate, RoundRobinArbiter, RouteComputer
 
@@ -604,11 +604,13 @@ def test_packet_data_flow_new():
             def port_color(s):
                 return s.p.data.start.payload[-len(watched_port):]
             def payload(s):
-                return Cat(s.p.tag, s.p.data.start.payload[:-len(watched_port)])
-                # return s.p.as_value()
-            # payload_port_color_slice = slice(-len(watched_port),)
-            # payload_port_rest_slice = slice(0,-len(watched_port))
-            m.submodules.checker = checker = FormalScoreboard(payload(router.local_in).shape())
+                # return Cat(s.p.tag, s.p.data.start.payload[:-len(watched_port)])
+                return s.p.data.start.payload[0]
+
+
+            # m.submodules.checker = checker = FormalScoreboard(payload(router.local_in).shape())
+
+            m.submodules.checker = checker = FormalScoreboardWolper()
 
             for (name, in_port, out_port, port) in router.port_name_direction_pairs():
                 input_stream = m.submodules[f"input_stream_{name}"] = ValidFlitStream(c=Assume, max_packet_len=4)

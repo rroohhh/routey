@@ -2,9 +2,9 @@
 
 
 from amaranth.asserts import AnyConst, AnySeq
-from amaranth.lib.wiring import Component, Signature, In
+from amaranth.lib.wiring import Component, Signature, In, connect, flipped
 from amaranth.lib import stream
-from amaranth import Assert, Cover, Signal, Module
+from amaranth import Assert, Cover, Signal, Module, Assume
 
 class FormalScoreboard(Component):
     def __init__(self, payload_shape):
@@ -45,4 +45,55 @@ class FormalScoreboard(Component):
         with m.If(ready_to_sample_output):
             m.d.sync += Assert(self.output.p == watched_data, "scoreboard data mismatch")
 
+        return m
+
+class WolperCheck(Component):
+    input: In(stream.Signature(1, always_ready=True))
+
+    def __init__(self, assume = True):
+        self._assume = assume
+        super().__init__()
+
+    def elaborate(self, _):
+        m = Module()
+
+        input = self.input
+
+        with m.If(input.valid):
+            with m.FSM() as fsm:
+                with m.State("WAITING_FOR_ONE"):
+                    with m.If(input.p):
+                        m.next = "SAW_ONE"
+                with m.State("SAW_ONE"):
+                    with m.If(input.p):
+                        m.next = "ZEROS"
+                    with m.Else():
+                        m.next = "ERROR"
+                with m.State("ZEROS"):
+                    with m.If(input.p):
+                        m.next = "ERROR"
+                with m.State("ERROR"):
+                    ...
+
+
+        if self._assume:
+            m.d.comb += Assume(~fsm.ongoing("ERROR"))
+        else:
+            m.d.comb += Assert(~fsm.ongoing("ERROR"))
+
+        return m
+
+
+# this can only be used for cases where the datapath does not influence the control logic
+class FormalScoreboardWolper(Component):
+    input: In(stream.Signature(1, always_ready = True))
+    output: In(stream.Signature(1, always_ready = True))
+
+    def elaborate(self, _):
+        m = Module()
+        m.submodules.input_assume = input = WolperCheck(assume=True)
+        m.submodules.output_assert = output = WolperCheck(assume=False)
+        print(self.input)
+        connect(m, flipped(self.input), input.input)
+        connect(m, flipped(self.output), output.input)
         return m
