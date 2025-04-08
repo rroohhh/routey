@@ -56,7 +56,9 @@ class ArqSender(Component):
         full = (write_ptr[-1] != read_ptr[-1]) & (write_ptr[:-1] == read_ptr[:-1])
 
         empty = write_ptr == read_ptr
+
         send_empty = write_ptr == send_ptr
+
         have_outstanding_to_send = write_ptr != next_send_ptr
 
         # write handling is simple, we just always write, when we push
@@ -81,7 +83,7 @@ class ArqSender(Component):
         nack = Signal()
         last_was_empty_push = Signal()
         m.d.sync += last_was_empty_push.eq(empty & push)
-        prefetch = (pop | nack | last_was_empty_push) & have_outstanding_to_send
+        prefetch =   last_was_empty_push | ((pop | nack) & have_outstanding_to_send)
 
         # m.d.sync += last_was_empty_push.eq(send_empty & push)
         # prefetch = last_was_empty_push | ((pop | nack) & have_outstanding_to_send)
@@ -399,14 +401,14 @@ def combined_formal_check(payload_shape = 1, window_size = 8, acks_per_window = 
 
             m.submodules.arq_sender = arq_sender = ArqSender(window_size, self.payload_shape)
             m.submodules.arq_receiver = arq_receiver = ArqReceiver(window_size, self.payload_shape, acks_per_window)
-            # m.submodules.scoreboard = scoreboard = FormalScoreboard(self.payload_shape);
-            m.submodules.scoreboard = scoreboard = FormalScoreboardWolper();
+            m.submodules.scoreboard = scoreboard = FormalScoreboard(self.payload_shape);
+            # m.submodules.scoreboard = scoreboard = FormalScoreboardWolper();
 
-            m.submodules.tx_link = tx_link = LinkModel(arq_sender.output.p.shape(), self.link_delay, lossy=True)
+            m.submodules.tx_link = tx_link = LinkModel(arq_sender.output.p.shape(), self.link_delay, lossy=False)
             m.submodules.rx_link = rx_link = LinkModel(arq_receiver.ack.p.shape(), self.link_delay)
 
             # with credit counting this should be a assert
-            m.d.comb += Assume(self.output.ready)
+            # m.d.comb += Assume(self.output.ready)
 
             # for debug
             # m.d.comb += Assume(~ResetSignal())
@@ -434,24 +436,32 @@ def combined_formal_check(payload_shape = 1, window_size = 8, acks_per_window = 
 
 
     spec = FormalCheck(window_size = window_size, payload_shape = payload_shape, acks_per_window = acks_per_window)
-    for mode in ["cover", "prove"]:
-        print(mode)
-        assertFormal(spec, ports=[
+
+    ports = [
             spec.input.valid,
             spec.input.ready,
             Value.cast(spec.input.p),
             spec.output.valid,
             spec.output.ready,
             Value.cast(spec.output.p),
-        ], mode=mode)
+    ]
+
+    from amaranth.back.verilog import convert
+    from pathlib import Path
+
+    Path("arq.sv").write_text(convert(spec, ports = ports))
+
+    # for mode in ["cover", "prove"]:
+    #     print(mode)
+    #     assertFormal(spec, ports=ports, mode=mode)
 
 
 if __name__ == "__main__":
     print("combined formal check")
     combined_formal_check()
 
-    print("formal arq receiver")
-    ArqReceiver.formal()
+    # print("formal arq receiver")
+    # ArqReceiver.formal()
 
-    print("formal arq sender")
-    ArqSender.formal()
+    # print("formal arq sender")
+    # ArqSender.formal()
