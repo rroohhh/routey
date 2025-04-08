@@ -4,8 +4,8 @@ import enum
 from collections import defaultdict
 from amaranth.lib import wiring, stream, data
 from amaranth import Shape, Value, Fragment, Elaboratable
-from .memory_mapped_router import MemoryMappedRouter
-from .wrap import pascal_case_to_snake_case, indent, EqSet, type_to_name, path_to_name
+from memory_mapped_router import MemoryMappedRouter
+from wrap import pascal_case_to_snake_case, indent, EqSet, type_to_name, path_to_name
 
 def name_for_sig(sig: wiring.Signature, field_names=list):
     if isinstance(sig, stream.Signature):
@@ -50,17 +50,20 @@ def gen_types(tys):
         typedef = ""
         if isinstance(ty, enum.EnumMeta):
             shape = Shape.cast(ty)
+            typedef += f"package {name};\n"
             typedef += f"typedef enum {type_to_name(shape)} {{\n"
             typedef += ",\n".join(f"{indent}{name.upper()} = {value.value}" for name, value in ty.__members__.items()) + "\n"
-            typedef += f"}} {name};"
+            typedef += f"}} {name};\n"
+            typedef += f"endpackage"
+            # typedef += f"import {name}::{name};"
         else:
-            match layout := data.Layout.cast(ty):
-                case data.StructLayout():
-                    packed_type = "struct"
-                case data.UnionLayout():
-                    packed_type = "union"
-                case _: # TODO(robin): how does default for match work?
-                    assert False
+            layout = data.Layout.cast(ty)
+            if isinstance(layout, data.StructLayout):
+                packed_type = "struct"
+            elif isinstance(layout, data.UnionLayout):
+                packed_type = "union"
+            else:
+                assert False
 
             typedef += f"typedef {packed_type} packed {{\n"
             for field_name, item in list(layout)[::-1]:
@@ -85,6 +88,7 @@ def generate(dut):
     field_names = defaultdict(list)
 
     module_name = pascal_case_to_snake_case(dut.__class__.__name__)
+    pkg_name = module_name + "_pkg"
     generated = f"module {module_name} (\n"
 
     (frag := Fragment.get(dut, None)).prepare()
@@ -126,37 +130,68 @@ def generate(dut):
     generated += f",\n".join(port_splats) + "\n"
     generated += f"{indent});\n"
 
-    generated += "endmodule;"
+    generated += "endmodule"
     types_to_generate = set()
 
     module_gen = generated
     generated = ""
     for i, sig in enumerate(signatures_to_gen):
         name = name_for_sig(sig, field_names[i])
+        is_stream = isinstance(sig, stream.Signature)
 
-        generated += f"interface {name};\n"
+        generated += f"interface {name} import {pkg_name}::*;;\n"
 
         name_polarity = []
         for path, thing in iter_flat_signature(sig):
             name = path_to_name(path)
-            name_polarity.append((name, thing.flow == wiring.In))
             generated += f"{indent}{type_to_name(thing.shape)} {name};\n"
-
             types_to_generate.add(thing.shape)
+
+            if is_stream and name == "payload":
+                continue
+            name_polarity.append((name, thing.flow == wiring.In))
 
         generated += "\n"
 
         generated += f"{indent}modport master (\n"
+        if is_stream:
+            generated += f"{indent*2}output .p(payload),\n"
         generated += gen_modport_items(name_polarity)
         generated += f"{indent});\n"
 
         generated += f"{indent}modport slave (\n"
+        if is_stream:
+            generated += f"{indent*2}input .p(payload),\n"
         generated += gen_modport_items(((n, not p) for n, p in name_polarity))
+        generated += f"{indent});\n"
+
+        generated += f"{indent}modport monitor (\n"
+        if is_stream:
+            generated += f"{indent*2}input .p(payload),\n"
+        generated += gen_modport_items(((n, True) for n, p in name_polarity))
         generated += f"{indent});\n"
 
         generated += "endinterface\n\n"
 
-    generated = "\n\n".join(gen_types(types_to_generate)) + "\n\n" + generated
+    types = gen_types(types_to_generate)
+    pkgs = []
+    normal = []
+    imports = []
+
+    for type in types:
+        if 'package' in type:
+            pkgs.append(type)
+            imports.append(type.split()[1][:-1])
+        else:
+            normal.append(type)
+
+    gen = generated
+    generated = "\n\n".join(pkgs) + "\n\n"
+    generated += f"package {pkg_name};\n" + \
+        "".join(f"import {i}::{i};\n" for i in imports) + \
+        "".join(f"export {i}::{i};\n" for i in imports) + \
+        "\n\n".join(normal) + "\nendpackage\n\n" + \
+        gen
 
 
     return generated + module_gen

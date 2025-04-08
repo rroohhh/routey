@@ -57,40 +57,39 @@ def outputs_reachable_by(input_channel_position: Port, route_computer_gen):
         sender_pos = sender.cfg.position
         receiver_pos = receiver.cfg.position
 
-        match sender_output_port:
-            case Port.north:
-                m.d.comb += Assume(sender_pos.y > 0)
-                m.d.comb += [
-                    receiver_pos.x.eq(sender_pos.x),
-                    receiver_pos.y.eq(sender_pos.y - 1),
-                ]
-            case Port.south:
-                m.d.comb += Assume(sender_pos.y < max_value(sender_pos.y))
-                m.d.comb += [
-                    receiver_pos.x.eq(sender_pos.x),
-                    receiver_pos.y.eq(sender_pos.y + 1),
-                ]
-            case Port.east:
-                m.d.comb += Assume(sender_pos.x < max_value(sender_pos.x))
-                m.d.comb += [
-                    receiver_pos.x.eq(sender_pos.x + 1),
-                    receiver_pos.y.eq(sender_pos.y),
-                ]
-            case Port.west:
-                m.d.comb += Assume(sender_pos.x > 0)
-                m.d.comb += [
-                    receiver_pos.x.eq(sender_pos.x - 1),
-                    receiver_pos.y.eq(sender_pos.y),
-                ]
-            case Port.local:
-                m.d.comb += [
-                    # we assume we dont send packets to ourselves through the crossbar
-                    Assume(receiver_pos != receiver.input.p),
-                    receiver_pos.x.eq(sender_pos.x),
-                    receiver_pos.y.eq(sender_pos.y),
-                ]
-            case _:
-                assert False, f"unsupported port direction {sender_output_port}"
+        if sender_output_port == Port.north:
+            m.d.comb += Assume(sender_pos.y > 0)
+            m.d.comb += [
+                receiver_pos.x.eq(sender_pos.x),
+                receiver_pos.y.eq(sender_pos.y - 1),
+            ]
+        elif sender_output_port == Port.south:
+            m.d.comb += Assume(sender_pos.y < max_value(sender_pos.y))
+            m.d.comb += [
+                receiver_pos.x.eq(sender_pos.x),
+                receiver_pos.y.eq(sender_pos.y + 1),
+            ]
+        elif sender_output_port == Port.east:
+            m.d.comb += Assume(sender_pos.x < max_value(sender_pos.x))
+            m.d.comb += [
+                receiver_pos.x.eq(sender_pos.x + 1),
+                receiver_pos.y.eq(sender_pos.y),
+            ]
+        elif sender_output_port == Port.west:
+            m.d.comb += Assume(sender_pos.x > 0)
+            m.d.comb += [
+                receiver_pos.x.eq(sender_pos.x - 1),
+                receiver_pos.y.eq(sender_pos.y),
+            ]
+        elif sender_output_port == Port.local:
+            m.d.comb += [
+                # we assume we dont send packets to ourselves through the crossbar
+                Assume(receiver_pos != receiver.input.p),
+                receiver_pos.x.eq(sender_pos.x),
+                receiver_pos.y.eq(sender_pos.y),
+            ]
+        else:
+            assert False, f"unsupported port direction {sender_output_port}"
 
         with m.If(receiver.result.valid & receiver.result.valid):
             m.d.comb += Assert(receiver.result.p != receiver_output_port)

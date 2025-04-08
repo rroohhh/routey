@@ -8,24 +8,23 @@ import json
 def formatter_for(signal):
     class _FormatEncoder(json.JSONEncoder):
         def default(self, obj):
-            match obj:
-                case Format():
+            if isinstance(obj, Format):
                     return obj._chunks
-                case SwitchValue():
-                    return {"type": "SwitchValue", "test": obj.test, "cases": obj.cases}
-                case Slice():
-                    return {"type": "Slice", "start": obj.start, "stop": obj.stop, "value": obj.value}
-                case Signal():
-                    assert obj is Value.cast(signal)
-                    assert obj.shape().signed == False
-                    return {"type": "Signal"}
-                case Const():
-                    assert obj.shape().signed == False
-                    return {"type": "Const", "value": hex(obj.value)}
-                case Operator():
-                    return {"type": "Operator", "operator": obj.operator, "operands": obj.operands}
-                case _:
-                    return super().default(obj)
+            elif isinstance(obj, SwitchValue):
+                return {"type": "SwitchValue", "test": obj.test, "cases": obj.cases}
+            elif isinstance(obj, Slice):
+                return {"type": "Slice", "start": obj.start, "stop": obj.stop, "value": obj.value}
+            elif isinstance(obj, Signal):
+                assert obj is Value.cast(signal)
+                assert obj.shape().signed == False
+                return {"type": "Signal"}
+            elif isinstance(obj, Const):
+                assert obj.shape().signed == False
+                return {"type": "Const", "value": hex(obj.value)}
+            elif isinstance(obj, Operator):
+                return {"type": "Operator", "operator": obj.operator, "operands": obj.operands}
+            else:
+                return super().default(obj)
     fmt = Format("") + signal._format
     if len(chunks := fmt._chunks) == 1 and chunks[0][0] is signal and chunks[0][1] == '':
         return None

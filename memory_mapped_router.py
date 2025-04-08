@@ -10,6 +10,7 @@ from amaranth.sim import Simulator, Period
 from amaranth.lib import data, stream, enum, wiring
 from amaranth.lib.fifo import SyncFIFO as SyncFIFOAmaranth
 from amaranth.lib.wiring import Component, In, Out
+from math import ceil
 
 class SyncFIFO(SyncFIFOAmaranth):
     def elaborate(self, plat):
@@ -34,19 +35,26 @@ class SyncFIFO(SyncFIFOAmaranth):
 # ARQ has 1 byte overhead (for SEQ), UT has 1 byte overhead (for ix), so
 # lets say flit size is 16 bytes
 
+# want: 64 + 8 bits payload plus byteen
 
 class Config:
-    LINK_BITS = 20
-    MUX_COUNT = 4
-    COORD_BITS = 8
-
     # for formal
     # LINK_BITS = 25
     # MUX_COUNT = 1
     # COORD_BITS = 4
 
     # minus three for id bits, minus 1 byte for seq minus 1 byte for crc
-    FLIT_SIZE = MUX_COUNT * LINK_BITS - 3 - 8 - 8
+    FLIT_SIZE = 64 + 8 + 2
+    MUX_COUNT = 4
+    COORD_BITS = 7
+
+    # calculate link bits from flit size
+    # 3 bits tag
+    # 8 bits sequence number
+    # 8 bits checksum
+    # MUX_COUNT * 2 bits for link id
+    LINK_BITS = int(ceil((FLIT_SIZE + 3 + 8 + 8 + (MUX_COUNT * 2)) / (2 * MUX_COUNT)) * 2)
+
     INPUT_CHANNEL_FIFO_DEPTH = 2
     INPUT_CHANNEL_OUTPUT_FIFO_DEPTH = 0
     INPUT_CHANNEL_ROUTE_PIPELINE_DEPTH = INPUT_CHANNEL_FIFO_DEPTH
@@ -556,7 +564,7 @@ async def send_packet(ctx, port, target, n_payload):
     ctx.set(port.valid, 0)
 
 
-if __name__ == "__main__":
+def sim():
     grid_size = 2
     n_packets = 10
 
@@ -629,3 +637,22 @@ if __name__ == "__main__":
 
     with sim.write_vcd("test.vcd"):
         sim.run_until(Period(MHz=100) * 1000)
+
+def generate():
+    import amaranth.back.verilog
+    cls = MemoryMappedRouter
+    name = ".".join([__spec__.name, cls.__qualname__])
+    print(amaranth.back.verilog.convert(cls(), name=name))
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="action", required=True)
+    subparsers.add_parser("generate")
+    subparsers.add_parser("sim")
+    args = parser.parse_args()
+    if args.action == "generate":
+        generate()
+    elif args.action == "sim":
+        sim()

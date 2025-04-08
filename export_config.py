@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from .autowrap import pascal_case_to_snake_case
+from autowrap import pascal_case_to_snake_case
 
 def config_items(config):
     return {
@@ -40,15 +40,14 @@ def export_config_cpp(config):
     print(generated)
 
 def export_config(flavor, config):
-    match flavor:
-        case "vhdl":
-            export_config_vhdl(config)
-        case "sv":
-            export_config_sv(config)
-        case "cpp":
-            export_config_cpp(config)
-        case _:
-            assert False
+    if flavor == "vhdl":
+        export_config_vhdl(config)
+    elif flavor == "sv":
+        export_config_sv(config)
+    elif flavor == "cpp":
+        export_config_cpp(config)
+    else:
+        assert False
 
 if __name__ == "__main__":
     import sys, importlib

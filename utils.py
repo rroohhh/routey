@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 import os
 import shutil
 import subprocess
@@ -57,8 +55,8 @@ def assertFormal(spec, ports=None, mode="bmc", depth=20, tmp = False):
         engine = "smtbmc"
         if mode == "prove":
             #engine = "abc pdr\naiger rIC3"
-            engine = "aiger rIC3"
-            # engine = "abc pdr"
+            # engine = "aiger rIC3"
+            engine = "abc pdr"
             # engine = "aiger imctk-eqy-engine --rarity-sim-rounds=20 --window-max=20"
             script = ""
         elif mode == "bmc":
@@ -72,6 +70,7 @@ def assertFormal(spec, ports=None, mode="bmc", depth=20, tmp = False):
         # multiclock on
         config = textwrap.dedent("""\
         [options]
+        vcd off
         mode {mode}
         depth {depth}
 
@@ -98,7 +97,7 @@ def assertFormal(spec, ports=None, mode="bmc", depth=20, tmp = False):
                 universal_newlines=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE) as proc:
             stdout, stderr = proc.communicate(config)
             if proc.returncode != 0:
-                if "Status: FAILED" in stdout:
+                if "Status: FAILED" in stdout or "Status returned by engine: FAIL" in stdout:
                     raise FormalVerificationFailed(stdout)
                 else:
                     assert False, "Formal verification failed:\n" + stdout
