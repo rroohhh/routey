@@ -3,8 +3,9 @@
 
 from amaranth.asserts import AnyConst, AnySeq
 from amaranth.lib.wiring import Component, Signature, In, connect, flipped
+from amaranth import Elaboratable, Signal, Assume, Assert, Module, Cover
 from amaranth.lib import stream
-from amaranth import Assert, Cover, Signal, Module, Assume
+
 
 class FormalScoreboard(Component):
     def __init__(self, payload_shape):
@@ -19,7 +20,7 @@ class FormalScoreboard(Component):
         trigger = AnySeq(1)
 
         # kind of arbitrary size, must be bigger than sequential depth
-        tracking_counter = Signal(3)
+        tracking_counter = Signal(32)
         wait_counter = Signal(32)
 
         sampled_input = Signal()
@@ -96,4 +97,36 @@ class FormalScoreboardWolper(Component):
         print(self.input)
         connect(m, flipped(self.input), input.input)
         connect(m, flipped(self.output), output.input)
+        return m
+
+
+class AXISStreamContract(Elaboratable):
+    def __init__(self, stream, c=Assume):
+        self.stream = stream
+        self.c = c
+
+    def elaborate(self, _):
+        c = self.c
+
+        m = Module()
+
+        outstanding = Signal()
+        last_payload = Signal.like(self.stream.p)
+
+        with m.If(self.stream.valid & self.stream.ready):
+            m.d.sync += outstanding.eq(0)
+
+        with m.If(self.stream.valid & ~self.stream.ready):
+            m.d.sync += outstanding.eq(1)
+            m.d.sync += last_payload.eq(self.stream.p)
+
+        with m.If(outstanding):
+            m.d.comb += [
+                c(self.stream.valid),
+                c(last_payload == self.stream.payload),
+            ]
+
+        if c is Assert:
+            m.d.comb += Cover(~self.stream.ready & self.stream.valid)
+
         return m

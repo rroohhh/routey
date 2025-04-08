@@ -14,7 +14,7 @@ from amaranth._toolchain import require_tool
 class FormalVerificationFailed(Exception):
     pass
 
-def assertFormal(spec, ports=None, mode="bmc", depth=1, tmp = False):
+def assertFormal(spec, ports=None, mode="bmc", depth=20, tmp = False):
     # stack = traceback.extract_stack()
     # for frame in reversed(stack):
     #     if (os.path.dirname(__file__) not in frame.filename) or (frame.name == "<module>"):
@@ -58,6 +58,7 @@ def assertFormal(spec, ports=None, mode="bmc", depth=1, tmp = False):
         if mode == "prove":
             #engine = "abc pdr\naiger rIC3"
             engine = "aiger rIC3"
+            # engine = "abc pdr"
             # engine = "aiger imctk-eqy-engine --rarity-sim-rounds=20 --window-max=20"
             script = ""
         elif mode == "bmc":
