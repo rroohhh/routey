@@ -1,12 +1,5 @@
-.DS_Store
-.idea
-*.log
-tmp/
-
-*.py[cod]
-*.egg
-build
-htmlcov
-
-.sim_results
-gen
+formal/.jg_project*
+formal/.*.hash
+**/xcelium.d
+xrun.log
+xrun.history
