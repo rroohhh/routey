@@ -4,7 +4,7 @@ from amaranth import unsigned
 from amaranth.lib import enum
 
 # TODO(robin): remove shape again
-class Port(enum.Enum, shape=unsigned(3)):
+class CardinalPort(enum.Enum, shape=unsigned(3)):
     local = 0
     north = enum.auto()
     south = enum.auto()
