@@ -82,6 +82,11 @@ class WolperCheck(Component):
         else:
             m.d.comb += Assert(~fsm.ongoing("ERROR"))
 
+        m.d.comb += [
+            Cover(fsm.ongoing("SAW_ONE")),
+            Cover(fsm.ongoing("ZEROS"))
+        ]
+
         return m
 
 

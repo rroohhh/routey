@@ -23,7 +23,8 @@ def type_is_trivial(ty):
     return False
 
 def type_to_name(ty, prefix="", field_name=""):
-    if isinstance(ty, int) or isinstance(ty, Shape):
+    if isinstance(ty, range) or isinstance(ty, int) or isinstance(ty, Shape):
+        ty = Shape.cast(ty)
         if isinstance(ty, Shape):
             assert not ty.signed
             ty = ty.width

@@ -1,5 +1,6 @@
 import re
 from amaranth import Shape
+from amaranth.lib import data
 
 class EqSet:
     def __init__(self):
@@ -23,7 +24,8 @@ def path_to_name(path: list):
     return "_".join(path)
 
 def type_to_name(ty, prefix="", field_name=""):
-    if isinstance(ty, int) or isinstance(ty, Shape):
+    if isinstance(ty, range) or isinstance(ty, int) or isinstance(ty, Shape):
+        ty = Shape.cast(ty)
         if isinstance(ty, Shape):
             assert not ty.signed
             ty = ty.width
@@ -35,6 +37,8 @@ def type_to_name(ty, prefix="", field_name=""):
     else:
         if hasattr(ty, "__name__"):
             return pascal_case_to_snake_case(ty.__name__)
+        elif isinstance(ty, data.StructLayout):
+            return pascal_case_to_snake_case(ty.__class__.__name__.removesuffix("Layout"))
         else:
             name = pascal_case_to_snake_case(field_name)
             if len(prefix) > 0:
