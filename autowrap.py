@@ -17,10 +17,8 @@ def name_for_sig(sig: wiring.Signature, field_names=list, prefix=None):
         payload_shape = sig._payload_shape
         if isinstance(payload_shape, int) or isinstance(payload_shape, range) or isinstance(payload_shape, data.ArrayLayout):
             name = prefix + field_names[0]
-        elif isinstance(payload_shape, data.Struct):
-            name = sig._payload_shape.__name__
-        elif isinstance(payload_shape, data.StructLayout): # TODO(robin): have to watch out for dupe, as these can be non static
-            name = sig._payload_shape.__class__.__name__.removesuffix("Layout")
+        else:
+            name = type_to_name(payload_shape)
         return pascal_case_to_snake_case(name) + "_stream_if"
     else:
         assert len(field_names) == 1
