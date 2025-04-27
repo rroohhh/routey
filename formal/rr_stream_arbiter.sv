@@ -97,9 +97,9 @@ module \arq.RRStreamArbiter (input__0__valid, input__1__payload, input__1__valid
   (* enum_value_1 = "TRANSFER/1" *)
   (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/arq.py:877" *)
   reg fsm_state = 1'h0;
-  (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/memory_mapped_router.py:264" *)
+  (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/memory_mapped_router.py:307" *)
   wire grant;
-  (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/memory_mapped_router.py:263" *)
+  (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/memory_mapped_router.py:306" *)
   wire grant_store;
   (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/arq.py:847" *)
   reg granted;
@@ -121,7 +121,7 @@ module \arq.RRStreamArbiter (input__0__valid, input__1__payload, input__1__valid
   (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/.venv/lib64/python3.9/site-packages/amaranth/lib/stream.py:49" *)
   input input__1__valid;
   wire input__1__valid;
-  (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/memory_mapped_router.py:262" *)
+  (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/memory_mapped_router.py:305" *)
   reg next;
   (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/arq.py:830" *)
   output [1:0] output__payload;
@@ -136,7 +136,7 @@ module \arq.RRStreamArbiter (input__0__valid, input__1__payload, input__1__valid
   (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/.venv/lib64/python3.9/site-packages/amaranth/lib/stream.py:49" *)
   output output__valid;
   reg output__valid;
-  (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/memory_mapped_router.py:261" *)
+  (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/memory_mapped_router.py:304" *)
   wire [1:0] requests;
   (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/.venv/lib64/python3.9/site-packages/amaranth/hdl/_ir.py:211" *)
   input rst;
@@ -284,7 +284,7 @@ module \arq.RRStreamArbiter (input__0__valid, input__1__payload, input__1__valid
   assign \$5  = fsm_state;
 endmodule
 
-(* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/memory_mapped_router.py:268" *)
+(* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/memory_mapped_router.py:311" *)
 (* generator = "Amaranth" *)
 module \arq.RRStreamArbiter.arbiter (rst, requests, next, grant, grant_store, clk);
   reg \$auto$verilog_backend.cc:2355:dump_module$2  = 0;
@@ -292,22 +292,22 @@ module \arq.RRStreamArbiter.arbiter (rst, requests, next, grant, grant_store, cl
   (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/.venv/lib64/python3.9/site-packages/amaranth/hdl/_ir.py:211" *)
   input clk;
   wire clk;
-  (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/memory_mapped_router.py:264" *)
+  (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/memory_mapped_router.py:307" *)
   output grant;
   reg grant;
-  (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/memory_mapped_router.py:263" *)
+  (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/memory_mapped_router.py:306" *)
   output grant_store;
   reg grant_store = 1'h0;
-  (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/memory_mapped_router.py:262" *)
+  (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/memory_mapped_router.py:305" *)
   input next;
   wire next;
-  (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/memory_mapped_router.py:261" *)
+  (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/memory_mapped_router.py:304" *)
   input [1:0] requests;
   wire [1:0] requests;
   (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/.venv/lib64/python3.9/site-packages/amaranth/hdl/_ir.py:211" *)
   input rst;
   wire rst;
-  (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/memory_mapped_router.py:263" *)
+  (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/memory_mapped_router.py:306" *)
   always @(posedge clk)
     grant_store <= \$1 ;
   always @* begin

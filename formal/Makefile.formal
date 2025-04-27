@@ -1,4 +1,4 @@
-FORMAL_TASKS=arq arq_sender arq_receiver multi_fifo
+FORMAL_TASKS=arq arq_sender arq_receiver multi_queue multi_queue_reader rr_stream_arbiter credit input_channel
 
 N_QUEUES=2
 PAYLOAD_SHAPE=1
@@ -28,5 +28,11 @@ $(abspath arq_sender.sv): ../arq.py ../autowrap.py
 
 $(abspath arq_receiver.sv): ../arq.py ../autowrap.py
 	uv --directory ../ run autowrap.py -i 'arq.ArqReceiver(payload_shape=$(PAYLOAD_SHAPE),window_size=$(WINDOW_SIZE),acks_per_window=4)' > $@
+
+$(abspath input_channel.sv): ../memory_mapped_router.py ../autowrap.py
+	uv --directory ../ run autowrap.py -i 'memory_mapped_router.InputChannel(name="local")' > $@
+
+$(abspath router_crossbar.sv): ../memory_mapped_router.py ../autowrap.py
+	uv --directory ../ run autowrap.py -i 'memory_mapped_router.RouterCrossbar()' > $@
 
 include ../../../../visionary-rtl-utils/formal/formal.mk

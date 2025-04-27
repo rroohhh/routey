@@ -2,6 +2,7 @@
 
 from collections import defaultdict
 from typing_extensions import override
+from typing import Callable
 
 from tagged_union import *
 from format_utils import *
@@ -17,7 +18,8 @@ class StreamFIFO(Component):
     # w_stream: In(stream.Signature())
     # r_stream: Out(stream.Signature())
 
-    def __init__(self, payload_shape: wiring.PureInterface | Shape, *, depth=2):
+    # : wiring.PureInterface | Shape
+    def __init__(self, payload_shape, *, depth=2):
         self.depth = depth
         if isinstance(payload_shape, wiring.FlippedInterface):
             payload_shape = wiring.flipped(payload_shape)
@@ -99,21 +101,19 @@ class FlitStart(data.Struct):
 class FlitPayload(data.Struct):
     payload: Config.FLIT_SIZE
 
-class FlitTail(data.Struct):
-    payload: Config.FLIT_SIZE
+class FlitTail(FlitPayload):
+    ...
 
 class FlitStartAndEnd(FlitStart):
     ...
-    # target: RoutingTarget
-    # payload: Config.FLIT_SIZE - RoutingTarget.as_shape().size
 
 # this should never enter the router, it is used for arq internal signaling
 class FlitARQAck(data.Struct):
     payload: Config.FLIT_SIZE
 
 # this should never enter the router, it is used for arq internal signaling
-class FlitARQNack(data.Struct):
-    payload: Config.FLIT_SIZE
+class FlitARQNack(FlitARQAck):
+    ...
 
 class Flit(TaggedUnion):
     start: FlitStart
@@ -144,14 +144,14 @@ class Port(data.Struct):
     @classmethod
     def __members__(cls) -> dict:
         return {
-            f"{name}_vc_{vc}" : cls.const({"port": dir, "vc_id": vc})
-            for name, dir in CardinalPort.__members__.items()
+            cls.name_for(v := cls.const({"port": dir, "vc_id": vc})) : v
+            for _, dir in CardinalPort.__members__.items()
             for vc in VcID
         }
 
-    # @override
-    # def __getitem__(self, key):
-    #     return Port.__members__()[key]
+    @classmethod
+    def name_for(cls, value) -> str:
+        return f"{value.port.name.lower()}_vc_{value.vc_id}"
 
 class RouteResult(data.Struct):
     new_target: RoutingTarget
@@ -205,6 +205,8 @@ class RoutedFlit(data.Struct):
     last: 1
     target: Port
 
+RoutedFlitStream = stream.Signature(RoutedFlit)
+
 InputChannelConfig = wiring.Signature({
     "invalid_flit_ctr": In(COUNTER_SIZE)
 })
@@ -213,7 +215,7 @@ InputChannelConfig = wiring.Signature({
 # TODO(robin): input cleaner
 class InputChannel(Component):
     flit_in: In(FlitStream)
-    flit_out: Out(stream.Signature(RoutedFlit))
+    flit_out: Out(RoutedFlitStream)
     cfg: In(InputChannelConfig)
     route_computer_cfg: In(RouteComputerConfig)
 
@@ -222,15 +224,10 @@ class InputChannel(Component):
         # super().__init__(path=(name + "_input_channel",))
         self._name = name
 
-
     # what values for result.p are possible given that I am the InputChannel for port `position`?
     # def outputs_reachable(self, position: Port) -> set[Port]:
     #     from crossbar_opt import outputs_reachable_by
     #     return outputs_reachable_by(position, RouteComputer)
-
-    def _print(self, string, *args):
-        args = f"{{}}, {{}}: {self.__class__.__name__}/{self._name}: {string}", self.route_computer_cfg.position.x, self.route_computer_cfg.position.y, *args
-        return Print(Format(*args))
 
     def elaborate(self, _):
         m = Module()
@@ -268,7 +265,7 @@ class InputChannel(Component):
                     ]
                     # if we fed this into the route computer, but we did not feed it into the fifo yet, we cannot longer assert
                     # valid, as otherwise we read the same flit multiple times
-                    with m.If(route_computer.input.ready & ~input_fifo.w_stream.ready):
+                    with m.If(route_computer.input.valid & route_computer.input.ready & ~input_fifo.w_stream.ready):
                         m.next = "wait_for_new"
             with m.State("wait_for_new"):
                 with m.If(input_fifo.w_stream.valid & input_fifo.w_stream.ready):
@@ -289,6 +286,7 @@ class InputChannel(Component):
             # rewrite old target with the new target obtained from the route computer
             flit_out.p.flit.data.start.target.eq(Mux(flit_in.p.is_head(), route_result.p.new_target, flit_in.payload.data.start.target)),
             flit_out.p.flit.data.start.payload.eq(flit_in.payload.data.start.payload),
+            flit_out.p.flit.tag.eq(flit_in.p.tag),
             flit_out.p.target.port.eq(route_result.p.port),
             flit_out.p.target.vc_id.eq(route_result.p.new_target.vc),
             flit_out.p.last.eq(flit_out.p.flit.is_last()),
@@ -298,7 +296,8 @@ class InputChannel(Component):
 
         return m
 
-# when asserting grant, this gives out a index on the next cycle
+# asserts round robin on requests and grant_store
+# asserting next sync writes grant to grant_store
 class RoundRobinArbiter(Component):
     def __init__(self, num_clients):
         super().__init__({
@@ -329,8 +328,6 @@ class RoundRobinArbiter(Component):
 
         return m
 
-# think about making this more async, by having a target and a data stream, like axi does
-# -> we can look at the upcoming inputs, do we gain anything by that?
 class PacketizedStreamCrossbarOutput(Component):
     output: Out(FlitStream)
 
@@ -351,11 +348,12 @@ class PacketizedStreamCrossbarOutput(Component):
         # because this is a round robin arbiter, we should not really select the same input stream twice back to back anyways
         mask = Signal.like(arbiter.requests)
         for i, input in enumerate(inputs):
-            m.d.comb += arbiter.requests[i].eq(input.valid & (input.payload.target == target) & ~mask[i])
+            m.d.comb += arbiter.requests[i].eq(input.valid & (input.payload.target == target))  # & ~mask[i])
 
         target = Signal.like(arbiter.grant)
         transfer = Signal()
         selected = Array(self._inputs)[target]
+        last_flit_transmitted = self.output.valid & self.output.ready & selected.p.last
 
         with m.If(transfer):
             m.d.comb += [
@@ -372,20 +370,16 @@ class PacketizedStreamCrossbarOutput(Component):
                         target.eq(arbiter.grant),
                         transfer.eq(1)
                     ]
-                    with m.If(self.output.valid & self.output.ready & selected.p.last):
+                    m.next = "TRANSFER"
+                    with m.If(last_flit_transmitted):
                         m.next = "IDLE"
-                    with m.Else():
-                        m.next = "TRANSFER"
             with m.State("TRANSFER"):
                     m.d.comb += [
                         target.eq(arbiter.grant_store),
                         transfer.eq(1)
                     ]
-                    with m.If(self.output.valid & self.output.ready):
-                        with m.If(selected.p.last):
-                            m.next = "IDLE"
-                        with m.Else():
-                            m.next = "TRANSFER"
+                    with m.If(last_flit_transmitted):
+                        m.next = "IDLE"
 
         return m
 
@@ -418,13 +412,50 @@ class PacketizedStreamCrossbar(Component):
 
         return m
 
+class RouterCrossbar(Component):
+    def __init__(self, should_connect: Callable[[Port, Port], bool] = None):
+        if should_connect is None:
+            self.should_connect = lambda a, b: a.port != b.port
+        self.port_order = list(Port.__members__().values())
+        n_ports = len(self.port_order)
+        super().__init__(wiring.Signature({
+            "inputs": In(RoutedFlitStream).array(n_ports),
+            "outputs": Out(FlitStream).array(n_ports)
+        }))
+
+    def input_for(port: Port):
+        return self.inputs[self.port_order.index(port)]
+
+    def output_for(port: Port):
+        return self.outputs[self.port_order.index(port)]
+
+    def elaborate(self, _):
+        m = Module()
+        input_readys = defaultdict(list)
+
+        for target, output_stream in zip(self.port_order, self.outputs):
+            inputs_for_output = list(
+                input for (src, input) in zip(self.port_order, self.inputs) if self.should_connect(src, target)
+            )
+            output = m.submodules[f"crossbar_output_{Port.name_for(target)}"] = PacketizedStreamCrossbarOutput(inputs_for_output, target)
+            wiring.connect(m, output.output, wiring.flipped(output_stream))
+
+            for i, input in enumerate(inputs_for_output):
+                # TODO: remove once https://github.com/amaranth-lang/amaranth/pull/1580 is merged
+                input_readys[wiring.flipped(input)].append(output.input_ready[i])
+
+        for i, input in enumerate(self.inputs):
+            m.d.comb += input.ready.eq(sum(input_readys[wiring.flipped(input)])[0])
+
+        return m
+
 
 MemoryMappedRouterConfig = wiring.Signature({
     "route_computer_cfg": In(RouteComputerConfig),
     **{f"{port.lower()}_cfg": In(InputChannelConfig) for port in Port.__members__().keys()}
 })
 
-# requirments for this router:
+# reqs for this router:
 # - never drop a packet, only ever send a packet when there is space, only ever read a packet when it will not be dropped
 # - process packets in order, the packets from any port have to be processed in order
 class MemoryMappedRouter(Component):
@@ -496,12 +527,15 @@ class MemoryMappedRouter(Component):
             wiring.connect(m, buffer.r_stream, wiring.flipped(flit_out))
             crossbar.add_input(flit_out, channel.outputs_reachable(position))
 
-        Value.cast(self.local_in.payload).attrs["debug_item"] = 1
-        self.local_in.ready.attrs["debug_item"] = 1
-        self.local_in.valid.attrs["debug_item"] = 1
-        Value.cast(self.local_out.payload).attrs["debug_item"] = 1
-        self.local_out.ready.attrs["debug_item"] = 1
-        self.local_out.valid.attrs["debug_item"] = 1
+
+        mark_debug(self.local_in, self.local_out)
+
+        # Value.cast(self.local_in.payload).attrs["debug_item"] = 1
+        # self.local_in.ready.attrs["debug_item"] = 1
+        # self.local_in.valid.attrs["debug_item"] = 1
+        # Value.cast(self.local_out.payload).attrs["debug_item"] = 1
+        # self.local_out.ready.attrs["debug_item"] = 1
+        # self.local_out.valid.attrs["debug_item"] = 1
 
         return add_formatting_attrs(m)
 

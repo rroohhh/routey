@@ -14,6 +14,10 @@ lwwreg.sv
 credit_formal.sv
 multi_fifo_reader.sv
 multi_queue_reader_formal.sv
+input_channel.sv
+input_channel_formal.sv
+router_crossbar.sv
+router_crossbar_formal.sv
+../../flit/formal/sourcelist.slst
 ../../../../visionary-rtl-utils/units/formal_utils/fifo_checker.sv
-#../../../../visionary-rtl-utils/units/formal_utils/fifo_checker_wolper.sv
-../../../../visionary-rtl-utils/units/axi/source/formal/axis_master_assertions.sv
+../../../../visionary-rtl-utils/units/formal_utils/fifo_checker_wolper.sv

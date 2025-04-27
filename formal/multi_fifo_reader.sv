@@ -4,7 +4,7 @@ package multi_queue_fifo_reader_pkg;
 
 endpackage
 
-interface multi_queue_fifo_reader_out_stream_if import multi_queue_fifo_reader_pkg::*;;
+interface multi_queue_fifo_reader_in_stream_if import multi_queue_fifo_reader_pkg::*;;
     logic payload;
     logic valid;
     logic ready;
@@ -26,7 +26,7 @@ interface multi_queue_fifo_reader_out_stream_if import multi_queue_fifo_reader_p
     );
 endinterface
 
-interface multi_queue_fifo_reader_in_stream_if import multi_queue_fifo_reader_pkg::*;;
+interface multi_queue_fifo_reader_out_stream_if import multi_queue_fifo_reader_pkg::*;;
     logic payload;
     logic valid;
     logic ready;
@@ -101,7 +101,7 @@ module \arq.MultiQueueFifoReader (input__0__valid, input__1__payload, input__1__
   (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/.venv/lib64/python3.9/site-packages/amaranth/hdl/_ir.py:211" *)
   input clk;
   wire clk;
-  (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/memory_mapped_router.py:264" *)
+  (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/memory_mapped_router.py:307" *)
   wire grant;
   (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/.venv/lib64/python3.9/site-packages/amaranth/lib/stream.py:48" *)
   input input__0__payload;
@@ -121,7 +121,7 @@ module \arq.MultiQueueFifoReader (input__0__valid, input__1__payload, input__1__
   (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/.venv/lib64/python3.9/site-packages/amaranth/lib/stream.py:49" *)
   input input__1__valid;
   wire input__1__valid;
-  (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/memory_mapped_router.py:262" *)
+  (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/memory_mapped_router.py:305" *)
   wire next;
   (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/.venv/lib64/python3.9/site-packages/amaranth/lib/stream.py:48" *)
   output output__0__payload;
@@ -145,7 +145,7 @@ module \arq.MultiQueueFifoReader (input__0__valid, input__1__payload, input__1__
   reg ready_outstanding_0 = 1'h0;
   (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/arq.py:900" *)
   reg ready_outstanding_1 = 1'h0;
-  (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/memory_mapped_router.py:261" *)
+  (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/memory_mapped_router.py:304" *)
   wire [1:0] requests;
   (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/.venv/lib64/python3.9/site-packages/amaranth/hdl/_ir.py:211" *)
   input rst;
@@ -217,7 +217,7 @@ module \arq.MultiQueueFifoReader (input__0__valid, input__1__payload, input__1__
   assign \$7  = grant;
 endmodule
 
-(* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/memory_mapped_router.py:268" *)
+(* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/memory_mapped_router.py:311" *)
 (* generator = "Amaranth" *)
 module \arq.MultiQueueFifoReader.arbiter (rst, next, requests, grant, clk);
   reg \$auto$verilog_backend.cc:2355:dump_module$2  = 0;
@@ -225,21 +225,21 @@ module \arq.MultiQueueFifoReader.arbiter (rst, next, requests, grant, clk);
   (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/.venv/lib64/python3.9/site-packages/amaranth/hdl/_ir.py:211" *)
   input clk;
   wire clk;
-  (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/memory_mapped_router.py:264" *)
+  (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/memory_mapped_router.py:307" *)
   output grant;
   reg grant;
-  (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/memory_mapped_router.py:263" *)
+  (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/memory_mapped_router.py:306" *)
   reg grant_store = 1'h0;
-  (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/memory_mapped_router.py:262" *)
+  (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/memory_mapped_router.py:305" *)
   input next;
   wire next;
-  (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/memory_mapped_router.py:261" *)
+  (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/memory_mapped_router.py:304" *)
   input [1:0] requests;
   wire [1:0] requests;
   (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/.venv/lib64/python3.9/site-packages/amaranth/hdl/_ir.py:211" *)
   input rst;
   wire rst;
-  (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/memory_mapped_router.py:263" *)
+  (* src = "/hyperfast/home/rheinema/master/fatmeshy/units/config_router/memory_mapped_router.py:306" *)
   always @(posedge clk)
     grant_store <= \$1 ;
   always @* begin
