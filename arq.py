@@ -1,6 +1,6 @@
+from round_robin_arbiter import RoundRobinArbiter
 from utils import assertFormal
 from formal_utils import FormalScoreboard, FormalScoreboardWolper, AXISStreamContract
-from memory_mapped_router import RoundRobinArbiter
 
 from amaranth import Module, Signal, Elaboratable, Value, Cover, Assert, Mux, Assume, ResetSignal, unsigned, Array
 from amaranth.asserts import AnySeq, AnyConst
@@ -38,6 +38,13 @@ class AckLayout(data.StructLayout):
             "seq_is_valid": 1 # a invalid seq can happen if we send a nack at the first received packet
         })
 
+def AckSignature(window_size):
+    return wiring.Signature({
+        "ack": Out(AckLayout(window_size=window_size)),
+        "trigger": Out(1),
+        "did_trigger": In(1)
+    })
+
 class ArqSender(Component):
     def __init__(self, window_size, payload_shape):
         self.window_size = window_size
@@ -45,7 +52,7 @@ class ArqSender(Component):
         super().__init__(wiring.Signature({
             "input": In(stream.Signature(payload_shape)),
             "output": Out(stream.Signature(ArqPayloadLayout(payload_shape, window_size))),
-            "ack": In(stream.Signature(AckLayout(window_size=window_size))),
+            "ack": In(stream.Signature(AckLayout(window_size=window_size), always_ready=True)),
         }))
 
     def elaborate(self, _):
@@ -162,7 +169,6 @@ class ArqSender(Component):
             m.d.comb += next_send_ptr.eq(next_read_ptr)
             trigger_resend()
 
-        m.d.comb += self.ack.ready.eq(1)
         with m.If(self.ack.valid & self.ack.ready):
             with m.If(self.ack.p.seq_is_valid):
                 # we get the ack that was received correctly, so we want to "read" the word after that, iff there is one after
@@ -243,6 +249,7 @@ class LWWReg(Component):
     def __init__(self, payload_shape):
         super().__init__(wiring.Signature({
             "output": Out(stream.Signature(payload_shape)),
+            "buffer_valid": Out(1),
             "input": In(stream.Signature(payload_shape, always_ready = True))
         }))
 
@@ -250,15 +257,15 @@ class LWWReg(Component):
         m = Module()
 
         buffer = Signal.like(self.input.p, reset_less=True)
-        buffer_valid = Signal()
+        buffer_valid = self.buffer_valid
 
-        m.d.comb += self.output.p.eq(Mux(self.input.valid, self.input.p, buffer))
-        m.d.comb += self.output.valid.eq(Mux(self.input.valid, self.input.valid, buffer_valid))
+        m.d.comb += self.output.p.eq(buffer)
+        m.d.comb += self.output.valid.eq(buffer_valid)
 
         with m.If(self.output.ready & self.output.valid):
             m.d.sync += buffer_valid.eq(0)
 
-        with m.If(self.input.valid & ~self.output.ready):
+        with m.If(self.input.valid & self.input.ready):
             m.d.sync += buffer_valid.eq(1)
             m.d.sync += buffer.eq(self.input.p)
 
@@ -273,7 +280,7 @@ class ArqReceiver(Component):
             "input_error": In(1),
             "output": Out(stream.Signature(payload_shape)),
             "input": In(stream.Signature(ArqPayloadLayout(payload_shape, window_size))),
-            "ack": Out(stream.Signature(AckLayout(window_size=window_size))),
+            "ack": Out(AckSignature(window_size=window_size)),
         }))
 
     def elaborate(self, _):
@@ -286,10 +293,7 @@ class ArqReceiver(Component):
         push = self.input.valid & self.input.ready
 
         input_seq_valid = self.input.valid & (self.input.p.seq == expected_seq)
-        input_seq_valid_dbg = Signal()
-        m.d.comb += input_seq_valid_dbg.eq(input_seq_valid )
-
-        with m.If(push & input_seq_valid_dbg):
+        with m.If(push & input_seq_valid):
             m.d.sync += last_seq_valid.eq(1),
             m.d.sync += last_seq.eq(self.input.p.seq)
 
@@ -299,19 +303,16 @@ class ArqReceiver(Component):
             self.output.valid.eq(input_seq_valid)
         ]
 
-        # ack handling
-        # we want lww semantics, ie if the ack stream was blocked,
-        # we always want to send the latest ack info
-        m.submodules.ack_sender = ack_sender = LWWReg(self.ack.p.shape())
+        m.d.comb += [
+            # TODO(robin): this is slightly pessimistic, as last_seq can be outdated by one word
+            self.ack.ack.seq.eq(last_seq),
+            self.ack.ack.seq_is_valid.eq(last_seq_valid),
+        ]
 
-        wiring.connect(m, ack_sender.output, wiring.flipped(self.ack))
-
-        def send_ack(is_nack: bool, seq, seq_valid):
+        def send_ack(is_nack: bool):
             return [
-                ack_sender.input.valid.eq(1),
-                ack_sender.input.p.is_nack.eq(is_nack),
-                ack_sender.input.p.seq_is_valid.eq(seq_valid),
-                ack_sender.input.p.seq.eq(seq)
+                self.ack.ack.is_nack.eq(is_nack),
+                self.ack.trigger.eq(1)
             ]
 
         # normal ack flow: ack every n'th word
@@ -320,7 +321,7 @@ class ArqReceiver(Component):
 
         # timeout for ack: if we have not received new words for some time and we have outstanding words
         # send a ack
-        # TODO(robin): max con
+        # TODO(robin): make this configurable
         timeout_max = self.window_size * 2
         timeout_counter = Signal(range(timeout_max + 1))
 
@@ -330,24 +331,40 @@ class ArqReceiver(Component):
             with m.If(timeout_counter != 0):
                 m.d.sync += timeout_counter.eq(timeout_counter - 1)
             with m.Else():
-                m.d.comb += send_ack(False, last_seq, last_seq_valid)
+                m.d.comb += send_ack(False)
                 m.d.sync += timeout_counter.eq(timeout_max)
 
 
         with m.If(push & input_seq_valid):
             with m.If(word_counter == (self.words_per_ack - 1)):
                 m.d.sync += word_counter.eq(0)
-                m.d.comb += send_ack(False, self.input.p.seq, True)
+                m.d.comb += send_ack(False)
             with m.Else():
                 m.d.sync += word_counter.eq(word_counter + 1)
+
+
+        with m.If(self.ack.did_trigger):
+            m.d.sync += [
+                word_counter.eq(0),
+            ]
 
         # TODO(robin): timeout for ack
         # send nack for out of order seq's
         # with m.If(self.input.valid & ~input_seq_valid):
         #     m.d.comb += send_ack(True, last_seq, last_seq_valid)
 
+        # TODO(robin): this about input_error <-> is_nack lwwreg stuff timing
+        # scenario:
+        # we get input error (because of chksum mismatch)
+        # -> this is routed comb to the receiver -> receiver triggers nack immediately
+        # -> nack is stored, but cannot be send out immediately
+        # -> now actually we received a valid packet before the one that had a chksum mismatch, but this had higher latency into the sender
+        # -> we ack this and potentially trigger a new ack to be sent, now without is_nack
+        # -> the old nack gets lost and no resend is triggerd
+        # Potentialy solution: make triggering is_nack reset timeout + word counter based triggering
+        # -> this means, unless the latency between the input_error assertion and the sender input is greater than these timeouts / wordcounts, the nack cannot get lost
         with m.If(self.input_error):
-            m.d.comb += send_ack(True, last_seq, last_seq_valid)
+            m.d.comb += send_ack(True)
 
         return m
 
@@ -562,7 +579,8 @@ class MultiQueueFIFO(Component):
         out_regs = [Signal.like(self.input.p, name = f"out_reg_{i}", reset_less=True) for i in range(self.n_queues)]
         out_reg_filleds = [Signal(name = f"out_reg_filled_{i}") for i in range(self.n_queues)]
 
-        m.submodules.buffer = buffer = Memory(shape = self.input.p.shape(), depth = self.depth * self.n_queues, init =[0])
+        # TODO(robin): on asic make this macro memory
+        m.submodules.buffer = buffer = Memory(shape = self.input.p.shape(), depth = self.depth * self.n_queues, init=[])
         buffer_write = buffer.write_port(domain = "sync");
         buffer_read = buffer.read_port(domain = "sync");
 
@@ -725,13 +743,16 @@ class MultiQueueFIFO(Component):
 def CreditShape(depth):
     return range(2 * depth)
 
+def CreditLayout(depth, n_queues):
+    return data.ArrayLayout(CreditShape(depth), n_queues)
+
 # this is basically a multi queue fifo with a remote memory
 class MultiQueueCreditCounterTX(Component):
     def __init__(self, payload_shape, n_queues, depth):
         super().__init__(wiring.Signature({
             "input": In(stream.Signature(payload_shape)).array(n_queues),
             "output": Out(stream.Signature(payload_shape)).array(n_queues),
-            "credit_in": In(stream.Signature(data.ArrayLayout(CreditShape(depth), n_queues), always_ready=True)),
+            "credit_in": In(stream.Signature(CreditLayout(depth, n_queues), always_ready=True)),
         }))
 
         self.n_queues = n_queues
@@ -770,22 +791,28 @@ class MultiQueueCreditCounterTX(Component):
 class StreamMonitor(data.StructLayout):
     valid: Signal
     ready: Signal
-    p: Signal
 
-    def __init__(self, payload_shape):
+    def __init__(self):
         super().__init__({
-            "p": payload_shape,
             "valid": 1,
             "ready": 1
         })
 
+
+
+def CreditRXSignature(depth, n_queues):
+    return wiring.Signature({
+        "credit": Out(CreditLayout(depth, n_queues)),
+        "did_trigger": In(1), # wether a ack was sent (acks always include credit updates)
+        "trigger": Out(1) # wether a credit update should be sent
+    })
+
+
 class MultiQueueCreditCounterRX(Component):
     def __init__(self, payload_shape, n_queues, depth, updates_per_depth = 4):
         super().__init__(wiring.Signature({
-            "fifo_output_monitor": In(StreamMonitor(payload_shape)).array(n_queues),
-            "credit_out": Out(CreditShape(depth)).array(n_queues),
-            "credit_out_did_trigger": In(1), # wether a ack was sent (acks always include credit updates)
-            "credit_out_trigger": Out(1) # wether a credit update should be sent
+            "fifo_output_monitor": In(StreamMonitor()).array(n_queues),
+            "credit_out": Out(CreditRXSignature(depth, n_queues)),
         }))
         self.n_queues = n_queues
         self.depth = depth
@@ -797,19 +824,19 @@ class MultiQueueCreditCounterRX(Component):
         read_ptrs = [Signal(CreditShape(self.depth), name = f"read_ptr_{i}") for i in range(self.n_queues)]
 
         for i in range(self.n_queues):
-            m.d.comb += self.credit_out[i].eq(read_ptrs[i])
+            m.d.comb += self.credit_out.credit[i].eq(read_ptrs[i])
             with m.If(self.fifo_output_monitor[i].valid & self.fifo_output_monitor[i].ready):
                 m.d.sync += read_ptrs[i].eq(read_ptrs[i] + 1)
 
         words_per_update = self.depth // self.updates_per_depth
         credit_trigger_timer = Signal(range(words_per_update))
 
-        with m.If(self.credit_out_did_trigger):
+        with m.If(self.credit_out.did_trigger):
             m.d.sync += credit_trigger_timer.eq(0)
         with m.Else():
             with m.If(credit_trigger_timer == (words_per_update - 1)):
                 m.d.sync += credit_trigger_timer.eq(0)
-                m.d.comb += self.credit_out_trigger.eq(1)
+                m.d.comb += self.credit_out.trigger.eq(1)
             with m.Else():
                 m.d.sync += credit_trigger_timer.eq(credit_trigger_timer + 1)
 
@@ -850,10 +877,10 @@ class RRStreamArbiter(Component):
 
         with m.If(transfer):
             m.d.comb += [
-                self.output.valid.eq(selected.valid),
-                self.output.p.p.eq(selected.p),
-                self.output.p.src.eq(granted),
-                selected.ready.eq(self.output.ready)
+                output.valid.eq(selected.valid),
+                output.p.p.eq(selected.p),
+                output.p.src.eq(granted),
+                selected.ready.eq(output.ready)
             ]
 
         with m.FSM():
@@ -864,7 +891,7 @@ class RRStreamArbiter(Component):
                         granted.eq(arbiter.grant),
                         transfer.eq(1)
                     ]
-                    with m.If(self.output.valid & self.output.ready):
+                    with m.If(output.valid & output.ready):
                         m.next = "IDLE"
                     with m.Else():
                         m.next = "TRANSFER"
@@ -873,7 +900,7 @@ class RRStreamArbiter(Component):
                         granted.eq(arbiter.grant_store),
                         transfer.eq(1)
                     ]
-                    with m.If(self.output.valid & self.output.ready):
+                    with m.If(output.valid & output.ready):
                         m.next = "IDLE"
 
         return m
