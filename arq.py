@@ -85,6 +85,7 @@ class ArqSender(Component):
         timeout_counter = Signal(range(timeout_max + 1), init=timeout_max)
         timeout_occured = timeout_counter == 0;
         with m.If(~empty):
+            # Do not trigger timeout if we are currently resending, no use...
             with m.If((self.ack.valid & self.ack.ready) | is_resend):
                 m.d.sync += timeout_counter.eq(timeout_max)
             with m.Else():
@@ -162,12 +163,12 @@ class ArqSender(Component):
         def trigger_resend():
             m.d.sync += [
                 is_resend.eq(1),
-                resend_start.eq(write_ptr) # force a resend of the whole window
+                resend_start.eq(write_ptr), # force a resend of the whole window
             ]
+            m.d.comb += next_send_ptr.eq(next_read_ptr)
 
         # Timeout has lower priority than ack
         with m.If(timeout_occured):
-            m.d.comb += next_send_ptr.eq(next_read_ptr)
             trigger_resend()
 
         with m.If(self.ack.valid & self.ack.ready):
@@ -181,7 +182,7 @@ class ArqSender(Component):
 
 
             with m.If(self.ack.p.is_nack):
-                m.d.comb += next_send_ptr.eq(next_read_ptr)
+                trigger_resend()
                 m.d.comb += nack.eq(1)
 
         m.d.sync += send_ptr.eq(next_send_ptr)
@@ -191,6 +192,8 @@ class ArqSender(Component):
         outstanding.attrs["capacity"] = self.window_size
         mark_debug(outstanding)
         m.d.comb += outstanding.eq(write_ptr - read_ptr)
+
+        mark_debug(is_resend)
 
         return m
 

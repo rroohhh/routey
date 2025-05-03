@@ -275,4 +275,4 @@ class RouterTop(Component):
 
 if __name__ == "__main__":
     m = RouterTop()
-    print(convert(m))
+    convert(m)
