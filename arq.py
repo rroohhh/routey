@@ -1,3 +1,4 @@
+from debug_utils import mark_debug
 from round_robin_arbiter import RoundRobinArbiter
 from utils import assertFormal
 from formal_utils import FormalScoreboard, FormalScoreboardWolper, AXISStreamContract
@@ -184,6 +185,12 @@ class ArqSender(Component):
                 m.d.comb += nack.eq(1)
 
         m.d.sync += send_ptr.eq(next_send_ptr)
+
+
+        outstanding = Signal.like(read_ptr)
+        outstanding.attrs["capacity"] = self.window_size
+        mark_debug(outstanding)
+        m.d.comb += outstanding.eq(write_ptr - read_ptr)
 
         return m
 
@@ -579,6 +586,13 @@ class MultiQueueFIFO(Component):
         out_regs = [Signal.like(self.input.p, name = f"out_reg_{i}", reset_less=True) for i in range(self.n_queues)]
         out_reg_filleds = [Signal(name = f"out_reg_filled_{i}") for i in range(self.n_queues)]
 
+
+        outstanding = [Signal.like(read_ptrs[i], name = f"outstanding_{i}") for i in range(self.n_queues)]
+        for o, r, w in zip(outstanding, read_ptrs, write_ptrs):
+            m.d.comb += o.eq(w - r)
+            o.attrs["capacity"] = self.depth
+            mark_debug(o)
+
         # TODO(robin): on asic make this macro memory
         m.submodules.buffer = buffer = Memory(shape = self.input.p.shape(), depth = self.depth * self.n_queues, init=[])
         buffer_write = buffer.write_port(domain = "sync");
@@ -927,7 +941,7 @@ class MultiQueueFifoReader(Component):
             ready_outstanding = Signal(1, name=f"ready_outstanding_{i}")
 
             m.d.comb += [
-                arbiter.requests[i].eq(output.ready | ready_outstanding),
+                arbiter.requests[i].eq(input.valid & output.ready | ready_outstanding),
                 input.ready.eq((arbiter.requests != 0) & (arbiter.grant == i)),
                 output.valid.eq(input.valid & ~ready_outstanding),
                 output.p.eq(input.p)

@@ -155,6 +155,76 @@ class LinkDemux(Component):
 
         return m
 
+class RouterLink(Component):
+    input: In(LinkStream)
+    output: Out(ArqStream)
+
+    to_router: Out(FlitStream).array(Config.N_VC)
+    from_router: In(FlitStream).array(Config.N_VC)
+
+    def elaborate(self, _):
+        m = Module()
+
+        # router out -> credit counting -> rr stream arbiter -> arq_sender -> link
+        m.submodules[f"credit_counter_tx"] = credit_tx = MultiQueueCreditCounterTX(Flit, Config.N_VC, Config.INPUT_CHANNEL_DEPTH)
+        m.submodules[f"vc_tx_arbiter"] = vc_arbiter = RRStreamArbiter(Flit, Config.N_VC)
+        m.submodules[f"arq_sender"] = arq_sender = ArqSender(Config.ARQ_WINDOW_SIZE, FlitWithVC)
+        m.submodules[f"link_mux"] = link_mux = LinkMux()
+
+        for vc in range(Config.N_VC):
+            wiring.connect(m, credit_tx.input[vc], wiring.flipped(self.from_router[vc]))
+            wiring.connect(m, credit_tx.output[vc], vc_arbiter.input[vc])
+
+        wiring.connect(m, vc_arbiter.output, arq_sender.input)
+        wiring.connect(m, arq_sender.output, link_mux.arq_tx)
+        wiring.connect(m, link_mux.link_out, wiring.flipped(self.output))
+
+        # link -> arq_receiver -> MQ FIFO -> MQ Reader -> router in
+        m.submodules[f"link_demux"] = link_demux = LinkDemux()
+        m.submodules[f"arq_receiver"] = arq_receiver = ArqReceiver(Config.ARQ_WINDOW_SIZE, FlitWithVC, acks_per_window = 4)
+        m.submodules[f"input_mq_fifo"] = input_fifo = MultiQueueFIFO(Flit, Config.N_VC, Config.INPUT_CHANNEL_DEPTH)
+        m.submodules[f"input_mq_reader"] = input_reader = MultiQueueFifoReader(Flit, Config.N_VC)
+
+        m.submodules[f"credit_counter_rx"] = credit_rx = MultiQueueCreditCounterRX(self, Config.N_VC, Config.INPUT_CHANNEL_DEPTH, updates_per_depth = 4)
+
+        # print(link_in, link_demux.link_in)
+        # wiring.connect(m, wiring.flipped(link_in), link_demux.link_in)
+        m.d.comb += [
+            link_demux.link_in.valid.eq(self.input.valid),
+            link_demux.link_in.p.eq(self.input.p),
+            # link_in.ready.eq(link_demux.link_in.ready),
+            arq_receiver.input_error.eq(self.input.input_error)
+        ]
+
+        wiring.connect(m, link_demux.arq_rx, arq_receiver.input)
+
+        # wiring.connect(m, arq_receiver.output, input_fifo.input)
+        m.d.comb += [
+            input_fifo.input.valid.eq(arq_receiver.output.valid),
+            input_fifo.input.p.eq(arq_receiver.output.p.flit),
+            input_fifo.input.target.eq(arq_receiver.output.p.vc),
+            arq_receiver.output.ready.eq(input_fifo.input.ready[arq_receiver.output.p.vc]),
+        ]
+
+        # print(m, input_fifo.output, input_reader.input)
+        for o, i in zip(input_fifo.output, input_reader.input):
+            wiring.connect(m, o, i)
+
+        for vc in range(Config.N_VC):
+            wiring.connect(m, input_reader.output[vc], wiring.flipped(self.to_router[vc]))
+            m.d.comb += [
+                credit_rx.fifo_output_monitor[vc].valid.eq(input_fifo.output[vc].valid),
+                credit_rx.fifo_output_monitor[vc].ready.eq(input_fifo.output[vc].ready)
+            ]
+
+        wiring.connect(m, link_demux.credit, credit_tx.credit_in)
+        wiring.connect(m, link_demux.ack, arq_sender.ack)
+
+        wiring.connect(m, link_mux.credit, credit_rx.credit_out)
+        wiring.connect(m, link_mux.ack, arq_receiver.ack)
+
+        return m
+
 class RouterTop(Component):
     local_in: In(FlitStream).array(Config.N_VC)
     local_out: Out(FlitStream).array(Config.N_VC)
@@ -190,64 +260,14 @@ class RouterTop(Component):
 
         for dir, link_in, link_out in self.links():
             dir_name = dir.name.lower()
+            m.submodules[f"{dir_name}"] = link = RouterLink()
 
-            # router out -> credit counting -> rr stream arbiter -> arq_sender -> link
-            m.submodules[f"credit_counter_tx_{dir_name}"] = credit_tx = MultiQueueCreditCounterTX(Flit, Config.N_VC, Config.INPUT_CHANNEL_DEPTH)
-            m.submodules[f"vc_tx_arbiter_{dir_name}"] = vc_arbiter = RRStreamArbiter(Flit, Config.N_VC)
-            m.submodules[f"arq_sender_{dir_name}"] = arq_sender = ArqSender(Config.ARQ_WINDOW_SIZE, FlitWithVC)
-            m.submodules[f"link_mux_{dir_name}"] = link_mux = LinkMux()
+            wiring.connect(m, wiring.flipped(link_in), link.input)
+            wiring.connect(m, link.output, wiring.flipped(link_out))
 
             for vc in range(Config.N_VC):
-                wiring.connect(m, credit_tx.input[vc], router.out_port(Port.const({"port": dir, "vc_id": vc})))
-                wiring.connect(m, credit_tx.output[vc], vc_arbiter.input[vc])
-
-            wiring.connect(m, vc_arbiter.output, arq_sender.input)
-            wiring.connect(m, arq_sender.output, link_mux.arq_tx)
-            wiring.connect(m, link_mux.link_out, wiring.flipped(link_out))
-
-            # link -> arq_receiver -> MQ FIFO -> MQ Reader -> router in
-            m.submodules[f"link_demux_{dir_name}"] = link_demux = LinkDemux()
-            m.submodules[f"arq_receiver_{dir_name}"] = arq_receiver = ArqReceiver(Config.ARQ_WINDOW_SIZE, FlitWithVC, acks_per_window = 4)
-            m.submodules[f"input_mq_fifo_{dir_name}"] = input_fifo = MultiQueueFIFO(Flit, Config.N_VC, Config.INPUT_CHANNEL_DEPTH)
-            m.submodules[f"input_mq_reader_{dir_name}"] = input_reader = MultiQueueFifoReader(Flit, Config.N_VC)
-
-            m.submodules[f"credit_counter_rx_{dir_name}"] = credit_rx = MultiQueueCreditCounterRX(self, Config.N_VC, Config.INPUT_CHANNEL_DEPTH, updates_per_depth = 4)
-
-            # print(link_in, link_demux.link_in)
-            # wiring.connect(m, wiring.flipped(link_in), link_demux.link_in)
-            m.d.comb += [
-                link_demux.link_in.valid.eq(link_in.valid),
-                link_demux.link_in.p.eq(link_in.p),
-                # link_in.ready.eq(link_demux.link_in.ready),
-                arq_receiver.input_error.eq(link_in.input_error)
-            ]
-
-            wiring.connect(m, link_demux.arq_rx, arq_receiver.input)
-
-            # wiring.connect(m, arq_receiver.output, input_fifo.input)
-            m.d.comb += [
-                input_fifo.input.valid.eq(arq_receiver.output.valid),
-                input_fifo.input.p.eq(arq_receiver.output.p.flit),
-                input_fifo.input.target.eq(arq_receiver.output.p.vc),
-                arq_receiver.output.ready.eq(input_fifo.input.ready[arq_receiver.output.p.vc]),
-            ]
-
-            # print(m, input_fifo.output, input_reader.input)
-            for o, i in zip(input_fifo.output, input_reader.input):
-                wiring.connect(m, o, i)
-
-            for vc in range(Config.N_VC):
-                wiring.connect(m, input_reader.output[vc], router.in_port(Port.const({"port": dir, "vc_id": vc})))
-                m.d.comb += [
-                    credit_rx.fifo_output_monitor[vc].valid.eq(input_fifo.output[vc].valid),
-                    credit_rx.fifo_output_monitor[vc].ready.eq(input_fifo.output[vc].ready)
-                ]
-
-            wiring.connect(m, link_demux.credit, credit_tx.credit_in)
-            wiring.connect(m, link_demux.ack, arq_sender.ack)
-
-            wiring.connect(m, link_mux.credit, credit_rx.credit_out)
-            wiring.connect(m, link_mux.ack, arq_receiver.ack)
+                wiring.connect(m, router.in_port(Port.const({"port": dir, "vc_id": vc})), link.to_router[vc])
+                wiring.connect(m, router.out_port(Port.const({"port": dir, "vc_id": vc})), link.from_router[vc])
 
         return add_formatting_attrs(m)
 

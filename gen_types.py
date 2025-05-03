@@ -5,14 +5,16 @@ from inspect import isclass
 from amaranth import Shape, ShapeCastable
 from amaranth.lib import data
 from tagged_union import TaggedUnion
-from .wrap import EqSet, type_to_name, indent, pascal_case_to_snake_case
+from wrap import EqSet, type_to_name, indent, pascal_case_to_snake_case
 
 def shape_to_value_type(shape: Shape):
     assert not shape.signed
     return f"value<{shape.width}>"
 
 def type_is_trivial(ty):
-    if isinstance(ty, int) or isinstance(ty, Shape):
+    if isinstance(ty, int) or isinstance(ty, Shape) or isinstance(ty, range):
+        if isinstance(ty, range):
+            ty = Shape.cast(ty)
         if isinstance(ty, Shape):
             assert not ty.signed
             ty = ty.width
@@ -56,9 +58,75 @@ value<Bits> value_from_int(IntegerT i) {
     value<Bits> res;
     res.set(i);
     return res;
-}""")
+}
+
+
+template <class T>
+constexpr size_t get_bits() {
+    if constexpr (std::is_integral<T>() && std::is_unsigned<T>()) {
+        return std::numeric_limits<T>::digits;
+    } else {
+        return T::bits;
+    }
+}
+
+
+template<size_t Bits, class Val>
+value<Bits> value_cast(Val v) {
+    if constexpr (std::is_integral<Val>() && std::is_unsigned<Val>()) {
+        return value_from_int<Bits>(v);
+    } else {
+        return v;
+    }
+}
+
+template<class Target, class Value>
+Target cast_value(Value v) {
+    if constexpr (std::is_integral<Target>() && std::is_unsigned<Target>()) {
+        return v.template get<Target>();
+    } else {
+        return v;
+    }
+}
+
+
+template<typename ElemT, size_t size>
+struct Array {
+    static constexpr size_t ElemBits = get_bits<ElemT>();
+    static constexpr size_t bits = ElemBits * size;
+
+    ElemT elems[size];
+    ElemT & operator[](const size_t idx) {
+        return elems[idx];
+    }
+    operator value<ElemBits * size>() const {
+        value<ElemBits * size> result;
+
+        ([&]<std::size_t... Idx>(std::index_sequence<Idx...>) {
+            (
+             void(result.template slice<(Idx + 1) * ElemBits - 1, Idx * ElemBits>() = value_cast<ElemBits>(elems[Idx]))
+             ,...);
+        })(std::make_index_sequence<size>());
+
+        return result;
+    }
+
+    Array & operator=(const value<ElemBits * size> & val) {
+        ([&]<std::size_t... Idx>(std::index_sequence<Idx...>) {
+            (
+             void(elems[Idx] = cast_value<ElemT>(val.template slice<(Idx + 1) * ElemBits - 1, Idx * ElemBits>().val()))
+             ,...);
+        })(std::make_index_sequence<size>());
+        return *this;
+    }
+};
+
+    """)
+
     def gen_type(ty, name=None):
         if isinstance(ty, int):
+            return
+        if isinstance(ty, range):
             return
 
         if name is None:
@@ -70,6 +138,7 @@ value<Bits> value_from_int(IntegerT i) {
             value_type = shape_to_value_type(shape)
             typedef += f"class {name} {{\n"
             typedef += f"public:\n"
+            typedef += f"{indent}constexpr static size_t bits = {shape.width};\n"
             typedef += f"{indent}enum Value : uint64_t {{\n"
             typedef += ",\n".join(f"{indent*2}{name} = {value.value}" for name, value in ty.__members__.items()) + "\n"
             typedef += f"{indent}}};\n"
@@ -77,6 +146,7 @@ value<Bits> value_from_int(IntegerT i) {
             typedef += f"{indent}{name}(const Value & val) {{ v = val; }}\n"
             typedef += f"{indent}{name}(const {value_type} & val) {{ v = static_cast<Value>(val.template get<uint64_t>()); }}\n"
             typedef += f"{indent}operator {value_type}() const {{ {value_type} result; result.set(static_cast<uint64_t>(v)); return result; }}\n"
+            typedef += f"{value_type} val() const {{ return *this; }}\n"
             typedef += f"{indent}operator Value() const {{ return v; }}\n"
             # typedef += f"auto operator<=>(const {name}&) const = default;\n"
             # typedef += f"auto operator<=>(const uint64_t& other) const {{ return v <=> other; }};\n"
@@ -102,6 +172,7 @@ struct std::formatter<{name}, char>
 
 
         else:
+            # print(ty)
             layout = data.Layout.cast(ty)
             is_packed_union = False
             if isclass(ty) and issubclass(ty, TaggedUnion):
@@ -120,10 +191,18 @@ struct std::formatter<{name}, char>
                         packed_type = "struct"
                     case data.UnionLayout():
                         packed_type = "union"
-                    case _: # TODO(robin): how does default for match work?
+                    case data.ArrayLayout():
+                        type_name = type_to_name(layout.elem_shape, prefix=name)
+                        typedef += f"using {name} = Array<{type_name}, {layout.length}>;"
+                        gen_type(layout.elem_shape)
+
+                        defined_types.add(typedef)
+                        return
+                    case _:
                         assert False
 
             typedef += f"{packed_type} {name} {{\n"
+            typedef += f"{indent}constexpr static size_t bits = {Shape.cast(layout).width};\n"
             if is_packed_union:
                 typedef += f"private:\n"
             for field_name, item in layout:
@@ -149,7 +228,7 @@ struct std::formatter<{name}, char>
             if packed_type == "struct" and not is_packed_union:
                 shape = Shape.cast(ty)
                 value_type = shape_to_value_type(shape)
-                typedef += f"auto operator<=>(const {name}&) const = default;\n"
+                typedef += f"{indent}auto operator<=>(const {name}&) const = default;\n"
                 # typedef += f"bool operator==(const {name}&) const = default;\n"
                 typedef += f"{indent}{name} & operator=(const {value_type} & val) {{\n"
                 member_inits = [f"{indent*2}{field_name} = {read_field(item)};\n" for field_name, item in layout]
@@ -162,6 +241,7 @@ struct std::formatter<{name}, char>
                     typedef += f"{indent*2}result.{write_field(item, field_name)};\n"
                 typedef += f"{indent*2}return result;\n"
                 typedef += f"{indent}}}\n"
+                typedef += f"{indent}{value_type} val() const {{ return *this; }}\n"
             if is_packed_union:
                 shape = Shape.cast(ty)
                 tag_field = layout['tag']
@@ -181,6 +261,7 @@ struct std::formatter<{name}, char>
                 typedef += f"{indent*2}}}\n"
                 typedef += f"{indent*2}return result;\n"
                 typedef += f"{indent}}}\n"
+                typedef += f"{indent}{value_type} val() const {{ return *this; }}\n"
 
                 typedef += f"{indent}static std::variant<{', '.join(type_to_name(field.shape) for _, field in tag_field_list)}> decode(const {value_type} & val) {{\n"
                 typedef += f"{indent*2}{tag_type_name} tag = {read_field(tag_field)};\n"
@@ -198,7 +279,6 @@ struct std::formatter<{name}, char>
                 typedef += f"{indent*3}default: std::unreachable();\n"
                 typedef += f"{indent*2}}}\n"
                 typedef += f"{indent}}}\n"
-
 
             typedef += f"}};"
 

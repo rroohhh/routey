@@ -100,7 +100,7 @@ class FlitARQAck(data.Struct):
     seq_is_valid: 1
     is_nack: 1
 
-    # payload: Config.FLIT_SIZE -  - AckLayout(window_size=Config.ARQ_WINDOW_SIZE).as_shape().size
+    payload: Config.FLIT_SIZE - CreditLayout(Config.INPUT_CHANNEL_DEPTH, Config.N_VC).size - 2
 
 
 class Flit(TaggedUnion):
