@@ -78,7 +78,6 @@ class Coordinate(data.Struct):
     y: Config.COORD_BITS
 
 class RoutingTarget(data.Struct):
-    vc: VcID
     target: Coordinate
 
 class FlitStart(data.Struct):
@@ -145,8 +144,11 @@ class Port(data.Struct):
 
 class RouteResult(data.Struct):
     new_target: RoutingTarget
-    port: CardinalPort
+    port: Port
 
+class RoutingInput(data.Struct):
+    vc: VcID
+    target: RoutingTarget
 
 # responsible for calculating which port to send this packet
 # for now just takes a coordinate and outputs a target port
@@ -160,7 +162,7 @@ class RouteResult(data.Struct):
 # TODO(robin): add a flow id + lookuptable configuration routing scheme (maybe shared buffer )
 # add source based routing aswell
 class RouteComputer(Component):
-    input: In(stream.Signature(RoutingTarget))
+    input: In(stream.Signature(RoutingInput))
     result: Out(stream.Signature(RouteResult))
     cfg: In(RouteComputerConfig)
 
@@ -170,20 +172,22 @@ class RouteComputer(Component):
         m.d.comb += self.input.ready.eq(self.result.ready)
         m.d.comb += self.result.valid.eq(self.input.valid)
 
-        input_x = self.input.payload.target.x
-        input_y = self.input.payload.target.y
+        input_x = self.input.payload.target.target.x
+        input_y = self.input.payload.target.target.y
+
         my_x = self.cfg.position.x
         my_y = self.cfg.position.y
         res = self.result.payload
 
-        m.d.comb += res.new_target.eq(self.input.payload)
+        m.d.comb += res.new_target.eq(self.input.payload.target)
+        m.d.comb += res.port.vc_id.eq(self.input.payload.vc)
 
         with m.If(input_x != my_x):
-            m.d.comb += res.port.eq(Mux(input_x > my_x, CardinalPort.east, CardinalPort.west))
+            m.d.comb += res.port.port.eq(Mux(input_x > my_x, CardinalPort.east, CardinalPort.west))
         with m.Elif(input_y != my_y):
-            m.d.comb += res.port.eq(Mux(input_y > my_y, CardinalPort.south, CardinalPort.north))
+            m.d.comb += res.port.port.eq(Mux(input_y > my_y, CardinalPort.south, CardinalPort.north))
         with m.Else():
-            m.d.comb += res.port.eq(CardinalPort.local)
+            m.d.comb += res.port.port.eq(CardinalPort.local)
 
         return m
 
@@ -209,10 +213,11 @@ class InputChannel(Component):
     cfg: In(InputChannelConfig)
     route_computer_cfg: In(RouteComputerConfig)
 
-    def __init__(self, name):
+    def __init__(self, vc, name):
         super().__init__()
         # super().__init__(path=(name + "_input_channel",))
         self._name = name
+        self.vc = vc
 
     def elaborate(self, _):
         m = Module()
@@ -239,7 +244,10 @@ class InputChannel(Component):
         ]
 
         # start and start_and_end have the same layout, so this is always valid
-        m.d.comb += route_computer.input.payload.eq(flit_in_before_fifo.payload.data.start.target)
+        m.d.comb += [
+            route_computer.input.payload.target.eq(flit_in_before_fifo.payload.data.start.target),
+            route_computer.input.payload.vc.eq(self.vc)
+        ]
 
         with m.FSM(name="route_computer_fsm"):
             with m.State("idle"):
@@ -265,6 +273,7 @@ class InputChannel(Component):
         route_result = route_result_buffer.r_stream
         flit_in = input_fifo.r_stream
 
+        # track this to reduce combinatorial path for the output stuff
         next_flit_out_has_routing = Signal(reset=1)
         with m.If(flit_out.valid & flit_out.ready):
             m.d.sync += next_flit_out_has_routing.eq(flit_out.p.flit.is_last())
@@ -276,8 +285,7 @@ class InputChannel(Component):
             flit_out.p.flit.data.start.target.eq(Mux(next_flit_out_has_routing, route_result.p.new_target, flit_in.payload.data.start.target)),
             flit_out.p.flit.data.start.payload.eq(flit_in.payload.data.start.payload),
             flit_out.p.flit.tag.eq(flit_in.p.tag),
-            flit_out.p.target.port.eq(route_result.p.port),
-            flit_out.p.target.vc_id.eq(route_result.p.new_target.vc),
+            flit_out.p.target.eq(route_result.p.port),
             flit_out.p.last.eq(flit_in.p.is_last()),
             flit_out.valid.eq(flit_in.valid & route_result.valid),
             route_result.ready.eq(flit_out.ready & flit_out.valid & flit_out.p.flit.is_last())
@@ -438,7 +446,7 @@ class MemoryMappedRouter(Component):
 
 
             # input path: InputChannel -> FIFO -> Crossbar
-            channel = m.submodules[f"{name}_input_channel"] = InputChannel(name)
+            channel = m.submodules[f"{name}_input_channel"] = InputChannel(port.vc_id, name)
             # print(channel.route_computer_cfg, self.cfg.route_computer_cfg)
             wiring.connect(m, channel.route_computer_cfg, wiring.flipped(self.cfg.route_computer_cfg))
             wiring.connect(m, channel.cfg, wiring.flipped(getattr(self.cfg, f"{name}_cfg")))
