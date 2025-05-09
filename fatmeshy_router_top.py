@@ -42,13 +42,13 @@ class AckCreditCombiner(Component):
     def elaborate(self, _):
         m = Module()
         out = self.output.p
-        lwwreg = m.submodules.lwwreg = LWWReg(self.ack_in.ack.is_nack.shape())
+        lwwreg = m.submodules.lwwreg = LWWReg(self.ack_in.p.is_nack.shape())
 
         m.d.comb += [
             self.output.valid.eq(lwwreg.output.valid),
             lwwreg.output.ready.eq(self.output.ready),
 
-            lwwreg.input.p.eq(self.ack_in.ack.is_nack),
+            lwwreg.input.p.eq(self.ack_in.p.is_nack),
 
             # whenever ack sends us the trigger, we sample is_nack
             # for credit this is more complicated. We dont want to overwrite is_nack, if we get a credit trigger
@@ -63,8 +63,8 @@ class AckCreditCombiner(Component):
             self.credit_in.did_trigger.eq(self.ack_in.trigger),
 
             out.ack.is_nack.eq(lwwreg.output.p),
-            out.ack.seq_is_valid.eq(self.ack_in.ack.seq_is_valid),
-            out.ack.seq.eq(self.ack_in.ack.seq),
+            out.ack.seq_is_valid.eq(self.ack_in.p.seq_is_valid),
+            out.ack.seq.eq(self.ack_in.p.seq),
             out.credit.eq(self.credit_in.credit)
         ]
 

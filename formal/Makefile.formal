@@ -30,7 +30,7 @@ $(abspath arq_receiver.sv): ../arq.py ../autowrap.py
 	uv --directory ../ run autowrap.py -i 'arq.ArqReceiver(payload_shape=$(PAYLOAD_SHAPE),window_size=$(WINDOW_SIZE),acks_per_window=4)' > $@
 
 $(abspath input_channel.sv): ../memory_mapped_router.py ../autowrap.py
-	uv --directory ../ run autowrap.py -i 'memory_mapped_router.InputChannel(name="local")' > $@
+	uv --directory ../ run autowrap.py -i 'memory_mapped_router.InputChannel(vc=0, name="local")' > $@
 
 $(abspath router_crossbar.sv): ../memory_mapped_router.py ../autowrap.py
 	uv --directory ../ run autowrap.py -i 'memory_mapped_router.RouterCrossbar()' > $@

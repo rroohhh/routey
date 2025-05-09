@@ -1,11 +1,11 @@
 `default_nettype none
 
 module rr_stream_arbiter_formal #(
-	localparam int QUEUE_COUNT = 3
+	localparam int QUEUE_COUNT = 2
 ) (
 	input wire clk, rst,
     rrstream_arbiter_in_stream_if in[QUEUE_COUNT],
-    rrstream_arbiter_stream_if out
+    rrstream_arbiter_payload_stream_if out
 );
 
 	rrstream_arbiter arb(
@@ -27,11 +27,11 @@ module rr_stream_arbiter_formal #(
 		assign in_ready[i] = in[i].ready;
 		assign in_valid[i] = in[i].valid;
 		assign in_p[i] = in[i].payload;
+		axis_master_assumptions #(.LIVENESS(0)) in_stream_assumptions(
+			.clk, .rst_n(~rst),
+			.stream(in[i])
+		);
 	end
-
-	// always_ff @(posedge clk) begin
-	// 	read_fair: assume property (s_eventually out_ready[selected_queue]);
-	// end
 
 	fifo_tracker check(
 		.clk,
@@ -42,6 +42,15 @@ module rr_stream_arbiter_formal #(
 		.output_data(out.payload.p)
 	);
 
+	axis_master_assertions out_stream_assertions(
+		.clk, .rst_n(~rst),
+		.stream(out),
+		.input_trigger_n(~check.input_en)
+	);
+
 	max_throughput_cover: cover property (@(posedge clk)
-		always in_ready[selected_queue] && in_valid[selected_queue]);
+		always (in_ready[selected_queue] && in_valid[selected_queue]));
+
+	max_throughput_cover2: cover property (@(posedge clk)
+		(in_ready[selected_queue] && in_valid[selected_queue])[->100]);
 endmodule

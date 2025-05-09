@@ -60,5 +60,5 @@ module multi_queue_reader_formal #(
 	);
 
 	max_throughput_cover: cover property (@(posedge clk)
-		always in.ready[selected_queue] && in.valid && (in.target == selected_queue) && &out_ready);
+		always in.ready[selected_queue] && in.valid && (in.target == selected_queue) && out_ready.and());
 endmodule

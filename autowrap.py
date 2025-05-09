@@ -76,7 +76,7 @@ def gen_types(tys):
                 packed_type = "union"
             elif isinstance(layout, data.ArrayLayout):
                 type_name = type_to_name(layout.elem_shape, prefix=name)
-                typedef = f"typedef {type_name}[{layout.length}] {name}"
+                typedef = f"typedef {type_name}[{layout.length - 1}:0] {name};"
                 gen_type(layout.elem_shape, name=type_name)
                 defined_types.add(typedef)
                 return

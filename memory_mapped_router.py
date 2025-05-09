@@ -348,7 +348,7 @@ class PacketizedStreamCrossbarOutput(Component):
 
 
 class RouterCrossbar(Component):
-    def __init__(self, should_connect: Callable[[Port, Port], bool] | None = None):
+    def __init__(self, should_connect: Callable[[Port, Port], bool] = None):
         if should_connect is None:
             self.should_connect = lambda a, b: a.port != b.port
         self.port_order = list(Port.__members__().values())

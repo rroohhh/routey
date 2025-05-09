@@ -41,7 +41,7 @@ class AckLayout(data.StructLayout):
 
 def AckSignature(window_size):
     return wiring.Signature({
-        "ack": Out(AckLayout(window_size=window_size)),
+        "p": Out(AckLayout(window_size=window_size)),
         "trigger": Out(1),
         "did_trigger": In(1)
     })
@@ -315,13 +315,13 @@ class ArqReceiver(Component):
 
         m.d.comb += [
             # TODO(robin): this is slightly pessimistic, as last_seq can be outdated by one word
-            self.ack.ack.seq.eq(last_seq),
-            self.ack.ack.seq_is_valid.eq(last_seq_valid),
+            self.ack.p.seq.eq(last_seq),
+            self.ack.p.seq_is_valid.eq(last_seq_valid),
         ]
 
         def send_ack(is_nack: bool):
             return [
-                self.ack.ack.is_nack.eq(is_nack),
+                self.ack.p.is_nack.eq(is_nack),
                 self.ack.trigger.eq(1)
             ]
 
@@ -944,6 +944,9 @@ class MultiQueueFifoReader(Component):
             ready_outstanding = Signal(1, name=f"ready_outstanding_{i}")
 
             m.d.comb += [
+                # gate on input valid, as otherwise, if all outputs assert ready,
+                # but not all inputs are valid, this grants a output priority,
+                # that cannot even read a input, leading to wasted cycles
                 arbiter.requests[i].eq(input.valid & output.ready | ready_outstanding),
                 input.ready.eq((arbiter.requests != 0) & (arbiter.grant == i)),
                 output.valid.eq(input.valid & ~ready_outstanding),
