@@ -6,7 +6,7 @@ from formal_utils import FormalScoreboard, FormalScoreboardWolper, AXISStreamCon
 from amaranth import Module, Signal, Elaboratable, Value, Cover, Assert, Mux, Assume, ResetSignal, unsigned, Array
 from amaranth.asserts import AnySeq, AnyConst
 from amaranth.lib import stream, data, wiring
-from amaranth.lib.wiring import In, Out, Component
+from amaranth.lib.wiring import In, Out, Component, Signature
 from amaranth.lib.memory import Memory
 from amaranth.back.verilog import convert
 from pathlib import Path
@@ -583,14 +583,23 @@ def combined_formal_check(payload_shape = 1, window_size = 8, acks_per_window = 
     #     print(mode)
     #     assertFormal(spec, ports=ports, mode=mode)
 
+class MultiQueueFIFOInputSignature(wiring.Signature):
+    def __init__(self, payload_shape, n_queues):
+        super().__init__({
+            "valid": Out(1),
+            "target": Out(range(n_queues)),
+            "p": Out(payload_shape),
+            "ready": In(data.ArrayLayout(1, n_queues))
+        })
 
-def MultiQueueFIFOInputSignature(payload_shape, n_queues):
-    return wiring.Signature({
-                "valid": Out(1),
-                "target": Out(range(n_queues)),
-                "p": Out(payload_shape),
-                "ready": In(data.ArrayLayout(1, n_queues))
-            })
+    def create(self, *, path=None, src_loc_at=0):
+        return MultiQueueFIFOInputInterface(self, path=path, src_loc_at=1 + src_loc_at)
+
+
+class MultiQueueFIFOInputInterface(wiring.PureInterface):
+    @property
+    def valid_ready(self):
+        return (self.valid, self.ready[self.target])
 
 # this tracks multiple fifo queues with a shared buffer
 # this means only one write can be active at any time

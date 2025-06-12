@@ -12,6 +12,7 @@ from format_utils import add_formatting_attrs
 from memory_mapped_router import Config, Flit, FlitStream, FlitWithVC, FlitWithVCStream, MemoryMappedRouter, MemoryMappedRouterConfig, Port
 from memory_mapped_router_types import CardinalPort
 from TSMC65Platform import TSMC65Platform
+from trace_signal_flow import trace_signal_flow
 
 ArqPayload = ArqPayloadLayout(FlitWithVC, Config.ARQ_WINDOW_SIZE)
 ArqStream = stream.Signature(ArqPayload)
@@ -186,7 +187,14 @@ class RouterLink(Component):
         m.d.comb += [
             link_demux.link_in.valid.eq(self.input.valid),
             link_demux.link_in.p.eq(self.input.p),
-            # link_in.ready.eq(link_demux.link_in.ready),
+
+            # due to credit counting, this is always 1
+            # TODO(robin): add module that counts up when we have valid == 1 and ready == 0
+            # (should always be zero, but nice for debugging)
+            # self.input.ready.eq(link_demux.link_in.ready),
+            self.input.ready.eq(1),
+
+            # NOTE: input_error must have same latency as input to avoid spurious failures, add delay regs to match link_demux latency
             arq_receiver.input_error.eq(self.input.input_error)
         ]
 
@@ -268,21 +276,9 @@ class RouterTop(Component):
 
 
 
+def flit_id(f: Flit, idw=32):
+    return Mux(f.is_head(), f.data.start.payload[:idw], f.data.payload.payload[:idw])
+
 if __name__ == "__main__":
-    m = RouterTop()
-
-    conv_ports = {}
-    for path, member, value in m.signature.flatten(m):
-        if isinstance(value, ValueCastable):
-            value = value.as_value()
-        if isinstance(value, Const):
-            assert member.flow == wiring.Out
-            continue
-        if isinstance(value, Value):
-            if member.flow == wiring.In:
-                dir = PortDirection.Input
-            else:
-                dir = PortDirection.Output
-            conv_ports["__".join(map(str, path))] = (value, dir)
-
-    convert(m, platform = TSMC65Platform(), ports=conv_ports)
+    m, ports = trace_signal_flow(RouterTop(), Flit, flit_id)
+    print(convert(m, ports=ports))
