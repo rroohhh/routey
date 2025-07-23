@@ -71,8 +71,10 @@ class ArqSender(Component):
         buffer_write = buffer.write_port(domain = "sync");
         buffer_read = buffer.read_port(domain = "sync");
 
-        push = self.input.valid & self.input.ready
-        pop = self.output.valid & self.output.ready
+        push = Signal()
+        m.d.comb += push.eq(self.input.valid & self.input.ready)
+        pop = Signal()
+        m.d.comb += pop.eq(self.output.valid & self.output.ready)
 
         # full = (write_ptr - read_ptr) == self.window_size
         # expressed based on the uppermost and lowermost index here, because amaranth auto widens the minus operation
@@ -98,7 +100,8 @@ class ArqSender(Component):
 
 
         # have to compare to the current write pointer, because we cannot read the word we write in the same cycle
-        have_outstanding_to_send = write_ptr != next_send_ptr
+        have_outstanding_to_send = Signal()
+        m.d.comb += have_outstanding_to_send.eq(write_ptr != next_send_ptr)
 
         # write handling is simple, we just always write, when we push
         # which is whenever we have space
@@ -110,29 +113,21 @@ class ArqSender(Component):
         m.d.comb += self.input.ready.eq(~full)
 
         # for reads we have to prefetch, as the read port is synchronous.
-        # There are three scenarios:
+        # There are two scenarios:
         # 1. The buffer was empty and now contains a word. This is a special case, as we dont have write port transparency,
         #    so we have to delay the read one cycle.
-        # 2. A word was read (pop'ed) and we have outstanding data to send. This compares the *current* write pointer to the next send pointer.
-        #    It has to be the *current* write pointer to avoid overlap with case 1. In this case, we can prefetch in this cycle, as the write has
-        #    occured atleast one cycle ago.
-        # 3. A nack was received. Here we can also prefetch in the same cycle as the nack, as the data must have been written atleast one cycle ago.
-        #    (We can only receive a nack for something we already send out one)
-        nack = Signal()
+        # 2. The send ptr was moved. Then we need to prefetch, whenever there is something outstanding to send
         last_was_empty_push = Signal()
+        send_ptr_moved = Signal()
         m.d.sync += last_was_empty_push.eq(~have_outstanding_to_send & push)
-        prefetch = ((pop | nack | last_was_empty_push | timeout_occured) & have_outstanding_to_send)
+        prefetch = Signal()
+        m.d.comb += prefetch.eq((send_ptr_moved | last_was_empty_push) & have_outstanding_to_send)
 
-        # Finally we have to track wether the word we present on the output has already been read
-        # (as the send ptr is eagerly incremented on prefetch)
-        # Two cases here:
-        # 1. Whenever a prefetch happens, in the next cycle we have a valid word to present
-        # 2. Whenever a pop (without a prefetch) happens, we no longer have a valid word to present
         send_outstanding = Signal()
+        # usually send_outstanding gets set by set_send_ptr, but this catches the
+        # case of a last_was_empty_push prefetch
         with m.If(prefetch):
             m.d.sync += send_outstanding.eq(1)
-        with m.Elif(pop):
-            m.d.sync += send_outstanding.eq(0)
 
         m.d.comb += [
             buffer_read.en.eq(prefetch),
@@ -142,6 +137,12 @@ class ArqSender(Component):
         ]
         m.d.comb += self.output.valid.eq(send_outstanding)
 
+        def set_send_ptr(target):
+            m.d.comb += send_ptr_moved.eq(1)
+            # only iff we actually prefetch something we will have a send outstanding
+            # overwrite any stale info here
+            m.d.sync += send_outstanding.eq(prefetch)
+            m.d.comb += next_send_ptr.eq(target)
 
         # the read ptr just gets set by received ack's
         # send ptr increments like a fifo pointer, unless we receive a nack
@@ -150,22 +151,22 @@ class ArqSender(Component):
             m.d.sync += write_ptr.eq(write_ptr + 1)
 
         with m.If(pop):
-            m.d.comb += next_send_ptr.eq(send_ptr + 1)
+            set_send_ptr(send_ptr + 1)
 
         next_read_ptr = Signal.like(read_ptr)
         m.d.comb += next_read_ptr.eq(read_ptr)
         m.d.sync += read_ptr.eq(next_read_ptr)
 
-        # TODO(robin): if the send ptr can jump forwards, this is no longer a valid check
-        with m.If(is_resend & (send_ptr == resend_start)):
+        with m.If(is_resend & (((send_ptr - resend_start) % (2 * self.window_size)) < self.window_size)):
             m.d.sync += is_resend.eq(0)
 
         def trigger_resend():
-            m.d.sync += [
-                is_resend.eq(1),
-                resend_start.eq(write_ptr), # force a resend of the whole window
-            ]
-            m.d.comb += next_send_ptr.eq(next_read_ptr)
+            with m.If(next_read_ptr != write_ptr):
+                m.d.sync += [
+                    is_resend.eq(1),
+                    resend_start.eq(write_ptr), # force a resend of the whole window
+                ]
+                set_send_ptr(next_read_ptr)
 
         # Timeout has lower priority than ack
         with m.If(timeout_occured):
@@ -175,15 +176,17 @@ class ArqSender(Component):
             with m.If(self.ack.p.seq_is_valid):
                 # we get the ack that was received correctly, so we want to "read" the word after that, iff there is one after
                 # (the empty and full logic only works it read cannot "walk" ahead of write pointers)
-                has_next = ((write_ptr - self.ack.p.seq) % (2 * self.window_size)) > 1
+                has_next = ((write_ptr - self.ack.p.seq) % (2 * self.window_size)) >= 1
                 m.d.comb += next_read_ptr.eq(self.ack.p.seq + has_next)
-                # TODO(robin): transport the send ptr to the ack here (if ack > send_ptr)
-                # (can this ever happen?)
+
+                # transport the send ptr to the ack here (if ack > send_ptr)
+                diff = (next_read_ptr - send_ptr - pop) % (2 * self.window_size)
+                with m.If(diff <= self.window_size):
+                    set_send_ptr(next_read_ptr)
 
 
             with m.If(self.ack.p.is_nack):
                 trigger_resend()
-                m.d.comb += nack.eq(1)
 
         m.d.sync += send_ptr.eq(next_send_ptr)
 
@@ -285,6 +288,7 @@ class ArqReceiver(Component):
     def __init__(self, window_size, payload_shape, acks_per_window = 4):
         self.window_size = window_size
         self.words_per_ack = self.window_size // acks_per_window
+        assert self.words_per_ack > 0
         assert onehot(window_size), "only power of two window size supported "
         super().__init__(wiring.Signature({
             "input_error": In(1),
@@ -319,11 +323,27 @@ class ArqReceiver(Component):
             self.ack.p.seq_is_valid.eq(last_seq_valid),
         ]
 
-        def send_ack(is_nack: bool):
-            return [
-                self.ack.p.is_nack.eq(is_nack),
-                self.ack.trigger.eq(1)
-            ]
+        nack_scheduled = Signal()
+        next_nack_scheduled = Signal()
+
+        m.d.comb += next_nack_scheduled.eq(nack_scheduled)
+        with m.If(self.input.valid & input_seq_valid):
+            m.d.comb += next_nack_scheduled.eq(0)
+        m.d.sync += nack_scheduled.eq(next_nack_scheduled)
+
+        m.d.comb += self.ack.p.is_nack.eq(next_nack_scheduled)
+
+        def send_ack(m, is_nack: bool, seq = None):
+            m.d.sync += timeout_counter.eq(timeout_max)
+            if seq is not None:
+                m.d.comb += self.ack.p.seq.eq(seq)
+            if is_nack:
+                m.d.comb += [
+                    self.ack.trigger.eq(~nack_scheduled),
+                    next_nack_scheduled.eq(1)
+                ]
+            else:
+                m.d.comb += [self.ack.trigger.eq(1)]
 
         # normal ack flow: ack every n'th word
         word_counter = Signal(range(self.words_per_ack))
@@ -332,7 +352,8 @@ class ArqReceiver(Component):
         # timeout for ack: if we have not received new words for some time and we have outstanding words
         # send a ack
         # TODO(robin): make this configurable
-        timeout_max = self.window_size * 2
+        # this is smaller than the arqsender resend timeout, to avoid spurious resends
+        timeout_max = self.window_size
         timeout_counter = Signal(range(timeout_max + 1))
 
         with m.If(word_counter == 0):
@@ -341,27 +362,32 @@ class ArqReceiver(Component):
             with m.If(timeout_counter != 0):
                 m.d.sync += timeout_counter.eq(timeout_counter - 1)
             with m.Else():
-                m.d.comb += send_ack(False)
-                m.d.sync += timeout_counter.eq(timeout_max)
-
+                m.d.sync += word_counter.eq(0)
+                send_ack(m, False)
 
         with m.If(push & input_seq_valid):
             with m.If(word_counter == (self.words_per_ack - 1)):
                 m.d.sync += word_counter.eq(0)
-                m.d.comb += send_ack(False)
+                # send with the expected seq,
+                # last_seq only gets updated next cycle
+                send_ack(m, False, expected_seq)
             with m.Else():
                 m.d.sync += word_counter.eq(word_counter + 1)
 
+        # send nack for out of order seq's
+        with m.If(self.input.valid):
+            # if they are in window, send a nack, we must have missed a word
+            with m.If(((expected_seq - self.input.p.seq) % (2 * self.window_size)) > self.window_size):
+                send_ack(m, True)
+            # if they are out of window, send a ack, the sender seems to resend unnecessaryily
+            with m.Elif(~input_seq_valid):
+                send_ack(m, False) # TODO(robin): throttle these?
 
         with m.If(self.ack.did_trigger):
             m.d.sync += [
                 word_counter.eq(0),
+                timeout_counter.eq(timeout_max)
             ]
-
-        # TODO(robin): timeout for ack
-        # send nack for out of order seq's
-        # with m.If(self.input.valid & ~input_seq_valid):
-        #     m.d.comb += send_ack(True, last_seq, last_seq_valid)
 
         # TODO(robin): this about input_error <-> is_nack lwwreg stuff timing
         # scenario:
@@ -374,7 +400,7 @@ class ArqReceiver(Component):
         # Potentialy solution: make triggering is_nack reset timeout + word counter based triggering
         # -> this means, unless the latency between the input_error assertion and the sender input is greater than these timeouts / wordcounts, the nack cannot get lost
         with m.If(self.input_error):
-            m.d.comb += send_ack(True)
+            send_ack(m, True)
 
         return m
 
@@ -839,11 +865,13 @@ class MultiQueueCreditCounterRX(Component):
         m = Module()
 
         read_ptrs = [Signal(CreditShape(self.depth), name = f"read_ptr_{i}") for i in range(self.n_queues)]
+        did_read = Signal()
 
         for i in range(self.n_queues):
             m.d.comb += self.credit_out.credit[i].eq(read_ptrs[i])
             with m.If(self.fifo_output_monitor[i].valid & self.fifo_output_monitor[i].ready):
                 m.d.sync += read_ptrs[i].eq(read_ptrs[i] + 1)
+                m.d.comb += did_read.eq(1)
 
         words_per_update = self.depth // self.updates_per_depth
         credit_trigger_timer = Signal(range(words_per_update))
@@ -855,7 +883,7 @@ class MultiQueueCreditCounterRX(Component):
                 m.d.sync += credit_trigger_timer.eq(0)
                 m.d.comb += self.credit_out.trigger.eq(1)
             with m.Else():
-                m.d.sync += credit_trigger_timer.eq(credit_trigger_timer + 1)
+                m.d.sync += credit_trigger_timer.eq(credit_trigger_timer + did_read)
 
         return m
 

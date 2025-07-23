@@ -2,7 +2,7 @@ FORMAL_TASKS=arq arq_sender arq_receiver multi_queue multi_queue_reader rr_strea
 
 N_QUEUES=2
 PAYLOAD_SHAPE=1
-WINDOW_SIZE=8
+WINDOW_SIZE=4
 FIFO_SIZE=8
 
 $(abspath rr_stream_arbiter.sv): ../arq.py ../autowrap.py
@@ -27,7 +27,7 @@ $(abspath arq_sender.sv): ../arq.py ../autowrap.py
 	uv --directory ../ run autowrap.py -i 'arq.ArqSender(payload_shape=$(PAYLOAD_SHAPE),window_size=$(WINDOW_SIZE))' > $@
 
 $(abspath arq_receiver.sv): ../arq.py ../autowrap.py
-	uv --directory ../ run autowrap.py -i 'arq.ArqReceiver(payload_shape=$(PAYLOAD_SHAPE),window_size=$(WINDOW_SIZE),acks_per_window=4)' > $@
+	uv --directory ../ run autowrap.py -i 'arq.ArqReceiver(payload_shape=$(PAYLOAD_SHAPE),window_size=$(WINDOW_SIZE),acks_per_window=2)' > $@
 
 $(abspath input_channel.sv): ../memory_mapped_router.py ../autowrap.py
 	uv --directory ../ run autowrap.py -i 'memory_mapped_router.InputChannel(vc=0, name="local")' > $@

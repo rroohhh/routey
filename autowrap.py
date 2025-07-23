@@ -21,8 +21,13 @@ def name_for_sig(sig: wiring.Signature, field_names=list, prefix=None):
             name = type_to_name(payload_shape)
         return pascal_case_to_snake_case(name) + "_stream_if"
     else:
-        assert len(field_names) == 1
-        return prefix + field_names[0] + "_if"
+        if isinstance(sig, wiring.Signature) and type(sig) is not wiring.Signature:
+            name = sig.__class__.__name__.removesuffix("Signature")
+            name = pascal_case_to_snake_case(name)
+        else:
+            name = prefix + field_names[0]
+            assert len(field_names) == 1
+        return name + "_if"
 
 def iter_flat_signature(sig: wiring.Signature, path = None):
     if path is None:
@@ -62,7 +67,7 @@ def gen_types(tys):
         typedef = ""
         if isinstance(ty, enum.EnumMeta):
             shape = Shape.cast(ty)
-            typedef += f"package {name};\n"
+            typedef += f"package {name}_pkg;\n"
             typedef += f"typedef enum {type_to_name(shape)} {{\n"
             typedef += ",\n".join(f"{indent}{name.upper()} = {value.value}" for name, value in ty.__members__.items()) + "\n"
             typedef += f"}} {name};\n"
@@ -285,8 +290,8 @@ def generate(dut, include_impl):
     gen = generated
     generated = "\n\n".join(pkgs) + "\n\n"
     generated += f"package {pkg_name};\n" + \
-        "".join(f"import {i}::{i};\n" for i in imports) + \
-        "".join(f"export {i}::{i};\n" for i in imports) + \
+        "".join(f"import {i}::{i.removesuffix('_pkg')};\n" for i in imports) + \
+        "".join(f"export {i}::{i.removesuffix('_pkg')};\n" for i in imports) + \
         "\n\n".join(normal) + "\nendpackage\n\n"
     generated += gen
 

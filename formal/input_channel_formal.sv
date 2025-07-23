@@ -44,10 +44,10 @@ module input_channel_formal (
 		(always s_eventually flit_out.valid) implies s_eventually flit_out.valid && flit_out.ready);
 
 	max_throughput_cover_long: cover property (@(posedge clk)
-		always (flit_out.payload.flit.tag != flit_tag::START_AND_END) && flit_out.valid && flit_out.ready);
+		always (flit_out.payload.flit.tag != flit_tag_pkg::START_AND_END) && flit_out.valid && flit_out.ready);
 
 	max_throughput_cover_short: cover property (@(posedge clk)
-		always (flit_out.payload.flit.tag == flit_tag::START_AND_END) && flit_out.valid && flit_out.ready);
+		always (flit_out.payload.flit.tag == flit_tag_pkg::START_AND_END) && flit_out.valid && flit_out.ready);
 
 	type(flit_out.payload.target) last_target;
 	logic last_target_valid;
@@ -70,6 +70,6 @@ module input_channel_formal (
 
 	last_is_correct: assert property(@(posedge clk)
 		flit_out.valid && flit_out.ready && flit_out.payload.last |->
-			flit_out.payload.flit.tag inside { flit_tag::START_AND_END, flit_tag::TAIL }
+			flit_out.payload.flit.tag inside { flit_tag_pkg::START_AND_END, flit_tag_pkg::TAIL }
 	);
 endmodule

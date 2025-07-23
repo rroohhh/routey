@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 
 
-from amaranth import Module, Mux
+from amaranth import Module, Mux, Signal
 from amaranth.back.rtlil import convert
 from amaranth.lib import data, stream, wiring
 from amaranth.lib.wiring import Component, In, Out
-from arq import AckLayout, AckSignature, ArqPayloadLayout, ArqReceiver, ArqSender, CreditLayout, CreditRXSignature, LWWReg, MultiQueueCreditCounterRX, MultiQueueCreditCounterTX, MultiQueueFIFO, MultiQueueFifoReader, RRStreamArbiter
+from arq import AckLayout, AckSignature, ArqPayloadLayout, ArqReceiver, ArqSender, CreditLayout, CreditRXSignature, MultiQueueCreditCounterRX, MultiQueueCreditCounterTX, MultiQueueFIFO, MultiQueueFifoReader, RRStreamArbiter
 from format_utils import add_formatting_attrs
 from memory_mapped_router import Config, Flit, FlitStream, MemoryMappedRouter, MemoryMappedRouterConfig, Port, VcID
 from memory_mapped_router_types import CardinalPort
@@ -16,12 +16,17 @@ class FlitWithVC(data.Struct):
 
 ArqPayload = ArqPayloadLayout(FlitWithVC, Config.ARQ_WINDOW_SIZE)
 ArqStream = stream.Signature(ArqPayload)
-LinkStream = wiring.Signature({
-    "valid": Out(1),
-    "p": Out(ArqPayload),
-    "input_error": Out(1),
-    "ready": In(1),
-})
+
+class LinkStreamSignature(wiring.Signature):
+    def __init__(self, payload_shape):
+        super().__init__({
+            "valid": Out(1),
+            "p": Out(payload_shape),
+            "input_error": Out(1),
+            "ready": In(1),
+        })
+
+LinkStream = LinkStreamSignature(ArqPayload)
 
 class AckCreditLayout(data.StructLayout):
     def __init__(self, window_size, depth, n_queues):
@@ -42,27 +47,22 @@ class AckCreditCombiner(Component):
     def elaborate(self, _):
         m = Module()
         out = self.output.p
-        lwwreg = m.submodules.lwwreg = LWWReg(self.ack_in.p.is_nack.shape())
+        outstanding = Signal()
+
+        with m.If((self.credit_in.trigger | self.ack_in.trigger) & ~self.output.ready):
+            m.d.sync += outstanding.eq(1)
+
+        with m.If(outstanding & self.output.ready):
+            m.d.sync += outstanding.eq(0)
 
         m.d.comb += [
-            self.output.valid.eq(lwwreg.output.valid),
-            lwwreg.output.ready.eq(self.output.ready),
-
-            lwwreg.input.p.eq(self.ack_in.p.is_nack),
-
-            # whenever ack sends us the trigger, we sample is_nack
-            # for credit this is more complicated. We dont want to overwrite is_nack, if we get a credit trigger
-            # So there are two cases:
-            # 1. We have something stored in the lwwreg. Then we do not need to assert valid for the credit trigger, as we are already trying to send a ack + credit flit
-            # 2. We have nothing stored in the lwwreg. Then we need to assert valid if we receive the credit trigger to store a new value to try to send out
-            # NOTE: lwwreg passes input.valid -> output.valid comb, so we cannot look at output.valid
-            lwwreg.input.valid.eq(self.ack_in.trigger | (~lwwreg.buffer_valid & self.credit_in.trigger)),
+            self.output.valid.eq(outstanding | self.credit_in.trigger | self.ack_in.trigger),
 
             # TODO(robin): think about making these trigger on self.output.valid & self.output.ready
             self.ack_in.did_trigger.eq(self.credit_in.trigger),
             self.credit_in.did_trigger.eq(self.ack_in.trigger),
 
-            out.ack.is_nack.eq(lwwreg.output.p),
+            out.ack.is_nack.eq(self.ack_in.p.is_nack),
             out.ack.seq_is_valid.eq(self.ack_in.p.seq_is_valid),
             out.ack.seq.eq(self.ack_in.p.seq),
             out.credit.eq(self.credit_in.credit)

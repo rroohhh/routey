@@ -3,7 +3,7 @@
 from collections import defaultdict
 from typing import Callable
 
-from arq import CreditLayout
+from arq import CreditLayout, LWWReg
 from debug_utils import mark_debug
 from round_robin_arbiter import RoundRobinArbiter
 from tagged_union import *
@@ -49,16 +49,19 @@ class Config:
     # MUX_COUNT = 1
     # COORD_BITS = 4
 
-    FLIT_SIZE = 64 + 8 + 2
-    MUX_COUNT = 4
-    COORD_BITS = 7
+    # 64 bit payload + 8 bit byteen
+    FLIT_SIZE = 64 + 8
+    # MUX_COUNT = 5
+    COORD_BITS = 6
+
+    LINK_COUNT = 4 # one for each cardinal direction
 
     # calculate link bits from flit size
     # 3 bits tag
     # 8 bits sequence number
     # 8 bits checksum
     # MUX_COUNT * 2 bits for link id
-    LINK_BITS = int(ceil((FLIT_SIZE + 3 + 8 + 8 + (MUX_COUNT * 2)) / (2 * MUX_COUNT)) * 2)
+    # LINK_BITS = int(ceil((FLIT_SIZE + 3 + 8 + 8 + (MUX_COUNT * 2)) / (2 * MUX_COUNT)) * 2)
 
     INPUT_CHANNEL_FIFO_DEPTH = 2
     INPUT_CHANNEL_OUTPUT_FIFO_DEPTH = 0
@@ -77,7 +80,12 @@ class Coordinate(data.Struct):
     x: Config.COORD_BITS
     y: Config.COORD_BITS
 
+
+class FlowID(Coordinate):
+    pass
+
 class RoutingTarget(data.Struct):
+    is_flow: 1
     target: Coordinate
 
 class FlitStart(data.Struct):
@@ -122,10 +130,6 @@ Config.ENCODED_FLIT_SIZE = data.Layout.cast(Flit).size
 
 FlitStream = stream.Signature(Flit)
 
-RouteComputerConfig = wiring.Signature({
-    "position": Out(Coordinate)
-})
-
 class Port(data.Struct):
     port: CardinalPort
     vc_id: VcID
@@ -145,6 +149,14 @@ class Port(data.Struct):
 class RouteResult(data.Struct):
     new_target: RoutingTarget
     port: Port
+
+RouteComputerConfig = wiring.Signature({
+    "position": Out(Coordinate),
+    "xy": Out(1),
+    "flow_lookup": In(stream.Signature(FlowID)),
+    "flow_result": Out(stream.Signature(RouteResult, always_ready=True))
+})
+
 
 class RoutingInput(data.Struct):
     vc: VcID
@@ -169,25 +181,45 @@ class RouteComputer(Component):
     def elaborate(self, _):
         m = Module()
 
-        m.d.comb += self.input.ready.eq(self.result.ready)
-        m.d.comb += self.result.valid.eq(self.input.valid)
+        with m.If(self.input.payload.target.is_flow):
+            m.submodules.flow_result_reg = flow_result_reg = LWWReg(RouteResult)
 
-        input_x = self.input.payload.target.target.x
-        input_y = self.input.payload.target.target.y
+            wiring.connect(m, wiring.flipped(self.cfg.flow_result), flow_result_reg.input)
+            wiring.connect(m, flow_result_reg.output, wiring.flipped(self.result))
 
-        my_x = self.cfg.position.x
-        my_y = self.cfg.position.y
-        res = self.result.payload
-
-        m.d.comb += res.new_target.eq(self.input.payload.target)
-        m.d.comb += res.port.vc_id.eq(self.input.payload.vc)
-
-        with m.If(input_x != my_x):
-            m.d.comb += res.port.port.eq(Mux(input_x > my_x, CardinalPort.east, CardinalPort.west))
-        with m.Elif(input_y != my_y):
-            m.d.comb += res.port.port.eq(Mux(input_y > my_y, CardinalPort.south, CardinalPort.north))
+            m.d.comb += [
+                self.cfg.flow_lookup.valid.eq(self.input.valid),
+                self.cfg.flow_lookup.p.eq(self.input.payload.target.target),
+                self.input.ready.eq(self.cfg.flow_lookup.ready)
+            ]
         with m.Else():
-            m.d.comb += res.port.port.eq(CardinalPort.local)
+            m.d.comb += self.input.ready.eq(self.result.ready)
+            m.d.comb += self.result.valid.eq(self.input.valid)
+
+            input_x = self.input.payload.target.target.x
+            input_y = self.input.payload.target.target.y
+
+            my_x = self.cfg.position.x
+            my_y = self.cfg.position.y
+            res = self.result.payload
+
+            m.d.comb += res.new_target.eq(self.input.payload.target)
+            m.d.comb += res.port.vc_id.eq(self.input.payload.vc)
+
+            with m.If(self.cfg.xy):
+                with m.If(input_x != my_x):
+                    m.d.comb += res.port.port.eq(Mux(input_x > my_x, CardinalPort.east, CardinalPort.west))
+                with m.Elif(input_y != my_y):
+                    m.d.comb += res.port.port.eq(Mux(input_y > my_y, CardinalPort.south, CardinalPort.north))
+                with m.Else():
+                    m.d.comb += res.port.port.eq(CardinalPort.local)
+            with m.Else():
+                with m.If(input_y != my_y):
+                    m.d.comb += res.port.port.eq(Mux(input_y > my_y, CardinalPort.south, CardinalPort.north))
+                with m.Elif(input_x != my_x):
+                    m.d.comb += res.port.port.eq(Mux(input_x > my_x, CardinalPort.east, CardinalPort.west))
+                with m.Else():
+                    m.d.comb += res.port.port.eq(CardinalPort.local)
 
         return m
 
@@ -386,7 +418,7 @@ class RouterCrossbar(Component):
 
 
 MemoryMappedRouterConfig = wiring.Signature({
-    "route_computer_cfg": Out(RouteComputerConfig),
+    **{f"{port}_route_computer_cfg": Out(RouteComputerConfig) for port in Port.__members__().keys()},
     **{f"{port}_cfg": Out(InputChannelConfig) for port in Port.__members__().keys()}
 })
 
@@ -448,7 +480,7 @@ class MemoryMappedRouter(Component):
             # input path: InputChannel -> FIFO -> Crossbar
             channel = m.submodules[f"{name}_input_channel"] = InputChannel(port.vc_id, name)
             # print(channel.route_computer_cfg, self.cfg.route_computer_cfg)
-            wiring.connect(m, channel.route_computer_cfg, wiring.flipped(self.cfg.route_computer_cfg))
+            wiring.connect(m, channel.route_computer_cfg, wiring.flipped(getattr(self.cfg, f"{name}_route_computer_cfg")))
             wiring.connect(m, channel.cfg, wiring.flipped(getattr(self.cfg, f"{name}_cfg")))
             wiring.connect(m, channel.flit_in, wiring.flipped(in_port))
 

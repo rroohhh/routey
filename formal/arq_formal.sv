@@ -9,6 +9,17 @@ module arq_formal #(
 );
     arq_payload_stream_if sender_to_link(), link_to_receiver();
     ack_stream_if ack_link_to_sender(), ack_receiver_to_link();
+ //, ack_receiver_to_link();
+	arq_receiver_ack_if ack_from_receiver();
+	assign ack_from_receiver.did_trigger = '0;
+	assign ack_receiver_to_link.valid = ack_from_receiver.trigger;
+	assign ack_receiver_to_link.payload = ack_from_receiver.p;
+
+// interface arq_receiver_ack_if import arq_receiver_pkg::*;;
+//     ack p;
+//     logic trigger;
+//     logic did_trigger;
+// end
 	logic tx_error_out;
 
 	link_model #(
@@ -43,7 +54,7 @@ module arq_formal #(
 		.input_error(tx_error_out),
 		.in(link_to_receiver),
 		.out,
-		.ack(ack_receiver_to_link)
+		.ack(ack_from_receiver)
 	);
 
 	// localparam int window_size = 1 << ($bits(sender_to_link.payload.seq) - 1);
@@ -67,9 +78,24 @@ module arq_formal #(
 		.output_data(out.payload)
 	);
 
-	typedef logic [$bits(sender_to_link.payload.seq) - 1: 0] seq_t;
+	int outstanding;
+	always_ff @(posedge clk or posedge rst) begin
+		if(rst) begin
+			outstanding <= 0;
+		end else begin
+			outstanding <= outstanding + (in.valid && in.ready) - (out.valid && out.ready);
+		end
+	end
 
-	localparam int window_size = 1 << ($bits(sender_to_link.payload.seq) - 1);
+	no_unneccessary_traffic_data: assert property (@(posedge clk)
+		(always (outstanding == 0)) implies (s_eventually (always !sender_to_link.valid)));
+	no_unneccessary_traffic_ack: assert property (@(posedge clk)
+		(always (outstanding == 0)) implies (s_eventually (always !ack_from_receiver.trigger)));
+
+
+	typedef logic [$bits(type(sender_to_link.payload.seq)) - 1: 0] seq_t;
+
+	localparam int window_size = 1 << ($bits(type(sender_to_link.payload.seq)) - 1);
 	for (genvar i = 0; i < 2 * window_size; i++) begin
 		wire want_to_send_next, can_send_next;
 		// assign want_to_send_next = sender_to_link.valid && (sender_to_link.payload.seq == seq_t'(highest_seq_without_error + 1));
@@ -93,7 +119,17 @@ module arq_formal #(
 				implies s_eventually (ack_receiver_to_link.valid && ack_receiver_to_link.ready && !ack_link.in_error));
 	end
 
-	// max_throughput_cover: cover property ((sender_to_link.valid && tx_link.in_error && sender_to_link.ready) #-# always (out.ready && out.valid));
 	max_throughput_cover: cover property (@(posedge clk)
+		s_eventually always (out.valid && out.ready));
+	max_throughput_cover_bounded: cover property (@(posedge clk)
+		(out.valid && out.ready)[->12]);
+	max_throughput_cover_with_error: cover property (@(posedge clk)
 		(sender_to_link.valid && tx_link.in_error && sender_to_link.ready)[->5] and s_eventually always (out.valid && out.ready));
+
+
+	// helper assertions:
+	read_ptr_valid:	assert property(@(posedge clk) seq_t'(sender.arq_sender_internal.write_ptr - sender.arq_sender_internal.read_ptr) <= window_size);
+	send_ptr_valid:	assert property(@(posedge clk) seq_t'(sender.arq_sender_internal.write_ptr - sender.arq_sender_internal.send_ptr) <= window_size);
+	expected_seq_valid:	assert property(@(posedge clk) seq_t'(sender.arq_sender_internal.write_ptr - receiver.arq_receiver_internal.expected_seq) <= window_size);
+	last_seq_read_ptr_matches: assert property(@(posedge clk) seq_t'(receiver.arq_receiver_internal.last_seq - sender.arq_sender_internal.read_ptr + 1) <= window_size);
 endmodule

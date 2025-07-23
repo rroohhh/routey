@@ -3,3 +3,5 @@ formal/.*.hash
 **/xcelium.d
 xrun.log
 xrun.history
+gen
+__pycache__
