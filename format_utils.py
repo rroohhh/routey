@@ -85,8 +85,8 @@ class _Visitor:
             for _patterns, elem in value.cases:
                 self.visit_sentinel(elem)
 
-def add_formatting_attrs(m: Module):
-    frag = Fragment.get(m, None)
+def add_formatting_attrs(m: Elaboratable, plat = None):
+    frag = Fragment.get(m, plat)
 
     _Visitor().visit_frag(frag)
 

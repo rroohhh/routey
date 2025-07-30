@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 
 
-from amaranth import Module, Mux, Signal
+from amaranth import Const, Module, Mux, Signal, Value, ValueCastable
+from amaranth.back import rtlil
+from amaranth.hdl._ir import  PortDirection
 from amaranth.back.rtlil import convert
 from amaranth.lib import data, stream, wiring
 from amaranth.lib.wiring import Component, In, Out
-from arq import AckLayout, AckSignature, ArqPayloadLayout, ArqReceiver, ArqSender, CreditLayout, CreditRXSignature, MultiQueueCreditCounterRX, MultiQueueCreditCounterTX, MultiQueueFIFO, MultiQueueFifoReader, RRStreamArbiter
+from arq import AckLayout, AckSignature, ArqPayloadLayout, ArqReceiver, ArqSender, CreditLayout, CreditRXSignature, CreditStream, MultiQueueCreditCounterRX, MultiQueueCreditCounterTX, MultiQueueFIFO, MultiQueueFifoReader, RRStreamArbiter
 from format_utils import add_formatting_attrs
-from memory_mapped_router import Config, Flit, FlitStream, MemoryMappedRouter, MemoryMappedRouterConfig, Port, VcID
+from memory_mapped_router import Config, Flit, FlitStream, FlitWithVC, FlitWithVCStream, MemoryMappedRouter, MemoryMappedRouterConfig, Port
 from memory_mapped_router_types import CardinalPort
-
-class FlitWithVC(data.Struct):
-    flit: Flit
-    vc: VcID
+from TSMC65Platform import TSMC65Platform
 
 ArqPayload = ArqPayloadLayout(FlitWithVC, Config.ARQ_WINDOW_SIZE)
 ArqStream = stream.Signature(ArqPayload)
@@ -160,22 +159,17 @@ class RouterLink(Component):
     output: Out(ArqStream)
 
     to_router: Out(FlitStream).array(Config.N_VC)
-    from_router: In(FlitStream).array(Config.N_VC)
+    from_router: In(FlitWithVCStream)
+    to_router_credit: Out(CreditStream(Config.INPUT_CHANNEL_DEPTH, Config.N_VC))
 
     def elaborate(self, _):
         m = Module()
 
-        # router out -> credit counting -> rr stream arbiter -> arq_sender -> link
-        m.submodules[f"credit_counter_tx"] = credit_tx = MultiQueueCreditCounterTX(Flit, Config.N_VC, Config.INPUT_CHANNEL_DEPTH)
-        m.submodules[f"vc_tx_arbiter"] = vc_arbiter = RRStreamArbiter(Flit, Config.N_VC)
+        # router out -> arq_sender -> link
         m.submodules[f"arq_sender"] = arq_sender = ArqSender(Config.ARQ_WINDOW_SIZE, FlitWithVC)
         m.submodules[f"link_mux"] = link_mux = LinkMux()
 
-        for vc in range(Config.N_VC):
-            wiring.connect(m, credit_tx.input[vc], wiring.flipped(self.from_router[vc]))
-            wiring.connect(m, credit_tx.output[vc], vc_arbiter.input[vc])
-
-        wiring.connect(m, vc_arbiter.output, arq_sender.input)
+        wiring.connect(m, wiring.flipped(self.from_router), arq_sender.input)
         wiring.connect(m, arq_sender.output, link_mux.arq_tx)
         wiring.connect(m, link_mux.link_out, wiring.flipped(self.output))
 
@@ -217,7 +211,7 @@ class RouterLink(Component):
                 credit_rx.fifo_output_monitor[vc].ready.eq(input_fifo.output[vc].ready)
             ]
 
-        wiring.connect(m, link_demux.credit, credit_tx.credit_in)
+        wiring.connect(m, link_demux.credit, wiring.flipped(self.to_router_credit))
         wiring.connect(m, link_demux.ack, arq_sender.ack)
 
         wiring.connect(m, link_mux.credit, credit_rx.credit_out)
@@ -248,7 +242,7 @@ class RouterTop(Component):
             (CardinalPort.west, self.link_w_i, self.link_w_o)
         ]
 
-    def elaborate(self, _):
+    def elaborate(self, plat):
         m = Module()
         router = m.submodules.router = MemoryMappedRouter()
         wiring.connect(m, wiring.flipped(self.cfg), router.cfg)
@@ -267,12 +261,28 @@ class RouterTop(Component):
 
             for vc in range(Config.N_VC):
                 wiring.connect(m, router.in_port(Port.const({"port": dir, "vc_id": vc})), link.to_router[vc])
-                wiring.connect(m, router.out_port(Port.const({"port": dir, "vc_id": vc})), link.from_router[vc])
+            wiring.connect(m, router.out_port(dir), link.from_router)
+            wiring.connect(m, router.credit_port(dir), link.to_router_credit)
 
-        return add_formatting_attrs(m)
+        return add_formatting_attrs(m, plat)
 
 
 
 if __name__ == "__main__":
     m = RouterTop()
-    convert(m)
+
+    conv_ports = {}
+    for path, member, value in m.signature.flatten(m):
+        if isinstance(value, ValueCastable):
+            value = value.as_value()
+        if isinstance(value, Const):
+            assert member.flow == wiring.Out
+            continue
+        if isinstance(value, Value):
+            if member.flow == wiring.In:
+                dir = PortDirection.Input
+            else:
+                dir = PortDirection.Output
+            conv_ports["__".join(map(str, path))] = (value, dir)
+
+    convert(m, platform = TSMC65Platform(), ports=conv_ports)

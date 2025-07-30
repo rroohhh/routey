@@ -789,13 +789,16 @@ def CreditShape(depth):
 def CreditLayout(depth, n_queues):
     return data.ArrayLayout(CreditShape(depth), n_queues)
 
+def CreditStream(depth, n_queues):
+    return stream.Signature(CreditLayout(depth, n_queues), always_ready=True)
+
 # this is basically a multi queue fifo with a remote memory
 class MultiQueueCreditCounterTX(Component):
     def __init__(self, payload_shape, n_queues, depth):
         super().__init__(wiring.Signature({
             "input": In(stream.Signature(payload_shape)).array(n_queues),
             "output": Out(stream.Signature(payload_shape)).array(n_queues),
-            "credit_in": In(stream.Signature(CreditLayout(depth, n_queues), always_ready=True)),
+            "credit_in": In(CreditStream(depth, n_queues)),
         }))
 
         self.n_queues = n_queues
@@ -949,6 +952,70 @@ class RRStreamArbiter(Component):
                         m.next = "IDLE"
 
         return m
+
+class RRStreamLastArbiterPayloadLayout(data.StructLayout):
+    last: Signal
+    src: Signal
+
+    def __init__(self, n_queues):
+        super().__init__({
+            "last": 1,
+            "src": range(n_queues)
+        })
+
+class RRStreamLastArbiter(Component):
+    def __init__(self, n_queues):
+        super().__init__(wiring.Signature({
+            "input": In(stream.Signature(1)).array(n_queues),
+            "output": Out(stream.Signature(RRStreamLastArbiterPayloadLayout(n_queues))),
+        }))
+        self.n_queues = n_queues
+
+    def elaborate(self, _):
+        m = Module()
+
+        inputs = self.input
+        output = self.output
+
+        arbiter = m.submodules.arbiter = RoundRobinArbiter(len(inputs))
+
+        for i, input in enumerate(inputs):
+            m.d.comb += arbiter.requests[i].eq(input.valid)
+
+        granted = Signal.like(arbiter.grant)
+        transfer = Signal()
+        selected = Array(inputs)[granted]
+
+        with m.If(transfer):
+            m.d.comb += [
+                output.valid.eq(selected.valid),
+                output.p.last.eq(selected.p),
+                output.p.src.eq(granted),
+                selected.ready.eq(output.ready)
+            ]
+
+        with m.FSM():
+            with m.State("IDLE"):
+                with m.If(arbiter.requests != 0):
+                    m.d.comb += [
+                        arbiter.next.eq(1),
+                        granted.eq(arbiter.grant),
+                        transfer.eq(1)
+                    ]
+                    with m.If(output.valid & output.ready & output.p.last):
+                        m.next = "IDLE"
+                    with m.Else():
+                        m.next = "TRANSFER"
+            with m.State("TRANSFER"):
+                    m.d.comb += [
+                        granted.eq(arbiter.grant_store),
+                        transfer.eq(1)
+                    ]
+                    with m.If(output.valid & output.ready & output.p.last):
+                        m.next = "IDLE"
+
+        return m
+
 
 
 # this should be used in combination with a MultiQueueFIFO to fulfill the $onehot0 requirement of the output path

@@ -5,7 +5,7 @@ from collections import defaultdict
 from amaranth.lib import wiring, stream, data
 from amaranth.hdl._ir import  PortDirection
 from amaranth import Shape, Value, Fragment, Elaboratable, Signal, Const, ValueCastable
-from memory_mapped_router import MemoryMappedRouter
+from TSMC65Platform import TSMC65Platform
 from wrap import pascal_case_to_snake_case, indent, EqSet, type_to_name, path_to_name
 
 def name_for_sig(sig: wiring.Signature, field_names=list, prefix=None):
@@ -112,7 +112,7 @@ def shape_and_value_to_literal(shape, value):
     else:
         return f"{shape.width}'d{value}"
 
-def generate(dut, include_impl):
+def generate(dut, include_impl, platform):
     signatures_to_gen = EqSet()
     field_names = defaultdict(list)
 
@@ -227,7 +227,7 @@ def generate(dut, include_impl):
                 else:
                     dir = PortDirection.Output
                 conv_ports["__".join(map(str, path))] = (value, dir)
-        generated += convert(dut, name=fqp, ports=conv_ports)
+        generated += convert(dut, name=fqp, ports=conv_ports, platform=platform)
 
     module_gen = generated
     generated = ""
@@ -302,9 +302,15 @@ if __name__ == "__main__":
     import sys, importlib
     import argparse
     parser = argparse.ArgumentParser()
+    parser.add_argument("--platform", action='store', help="platform", default="tsmc")
     parser.add_argument("-i", action='store_true', help="include impls")
     parser.add_argument("classes", nargs="+", help="what to generate")
     res = parser.parse_args()
+
+    platform = {
+        "tsmc": TSMC65Platform(),
+        "sim": None
+    }[res.platform]
 
     for name in res.classes:
         if "(" in name:
@@ -322,4 +328,4 @@ if __name__ == "__main__":
         print(generate(eval(f"py_class({args})", globals(), {
             py_module_name: py_module,
             **locals()
-        }), res.i))
+        }), res.i, platform))

@@ -2,10 +2,10 @@
 
 from collections import defaultdict
 from typing import Callable
+import typing
 
-from arq import CreditLayout, LWWReg
+from arq import CreditLayout, CreditStream, LWWReg, MultiQueueCreditCounterTX, RRStreamArbiter, RRStreamLastArbiter
 from debug_utils import mark_debug
-from round_robin_arbiter import RoundRobinArbiter
 from tagged_union import *
 from format_utils import *
 from memory_mapped_router_types import CardinalPort
@@ -14,7 +14,8 @@ from amaranth.sim import Simulator, Period
 from amaranth.lib import data, stream, wiring
 from amaranth.lib.fifo import SyncFIFO as SyncFIFOAmaranth
 from amaranth.lib.wiring import Component, In, Out
-from math import ceil
+
+from util import EqDefaultDict
 
 class StreamFIFO(Component):
     def __init__(self, payload_shape, *, depth=2):
@@ -63,7 +64,7 @@ class Config:
     # MUX_COUNT * 2 bits for link id
     # LINK_BITS = int(ceil((FLIT_SIZE + 3 + 8 + 8 + (MUX_COUNT * 2)) / (2 * MUX_COUNT)) * 2)
 
-    INPUT_CHANNEL_FIFO_DEPTH = 2
+    INPUT_CHANNEL_FIFO_DEPTH = 1
     INPUT_CHANNEL_OUTPUT_FIFO_DEPTH = 0
     INPUT_CHANNEL_ROUTE_PIPELINE_DEPTH = INPUT_CHANNEL_FIFO_DEPTH
     CROSSBAR_OUTPUT_FIFO_DEPTH = 0
@@ -129,6 +130,12 @@ class Flit(TaggedUnion):
 Config.ENCODED_FLIT_SIZE = data.Layout.cast(Flit).size
 
 FlitStream = stream.Signature(Flit)
+
+class FlitWithVC(data.Struct):
+    flit: Flit
+    vc: VcID
+
+FlitWithVCStream = stream.Signature(FlitWithVC)
 
 class Port(data.Struct):
     port: CardinalPort
@@ -325,94 +332,267 @@ class InputChannel(Component):
 
         return m
 
+class VCAllocatorInput(data.Struct):
+    target: Port
+    last: 1
 
-class PacketizedStreamCrossbarOutput(Component):
-    output: Out(FlitStream)
-
-    def __init__(self, inputs, target: Port):
-        super().__init__()
-        self._inputs = inputs
-        self._target = target
-        self.input_ready = Signal(len(inputs))
+class VCAllocator(Component):
+    def __init__(self, should_connect: Callable[[Port, Port], bool] = None):
+        self.should_connect = should_connect
+        self.port_order = list(Port.__members__().values())
+        self.credit_port_order = [port for port in CardinalPort.__members__.values() if port != CardinalPort.local]
+        n_ports = len(self.port_order)
+        super().__init__({
+            "inputs": In(stream.Signature(VCAllocatorInput)).array(n_ports), # is last
+            "credit": In(CreditStream(Config.INPUT_CHANNEL_DEPTH, Config.N_VC)).array(len(self.credit_port_order)),
+            "outputs": Out(stream.Signature(0)).array(n_ports)
+        })
 
     def elaborate(self, _):
         m = Module()
-        inputs = self._inputs
-        target = self._target
 
-        arbiter = m.submodules.arbiter = RoundRobinArbiter(len(inputs))
+        PortIdx = len(self.port_order)
 
-        for i, input in enumerate(inputs):
-            m.d.comb += arbiter.requests[i].eq(input.valid & (input.payload.target == target))
+        arb_for = EqDefaultDict(lambda: stream.Signature(Port).create())
 
-        target = Signal.like(arbiter.grant)
-        transfer = Signal()
-        selected = Array(self._inputs)[target]
-        last_flit_transmitted = self.output.valid & self.output.ready & selected.p.last
+        input_ready = Array(Signal(PortIdx) for _ in range(PortIdx))
 
-        with m.If(transfer):
+        for target in self.port_order:
+            srcs, inputs_for_arb = list(zip(*list(
+                (i, input) for i, (src, input) in enumerate(zip(self.port_order, self.inputs)) if self.should_connect(src, target)
+            )))
+            m.submodules[f"credit_counter_tx_{Port.name_for(target)}_arb"] = arb = RRStreamLastArbiter(len(inputs_for_arb))
+
+            for i, (input_idx, input) in enumerate(zip(srcs, inputs_for_arb)):
+                m.d.comb += [
+                    arb.input[i].valid.eq(input.valid & (input.p.target == target)),
+                    arb.input[i].p.eq(input.p.last),
+                    input_ready[input_idx][self.port_order.index(target)].eq(arb.input[i].ready)
+                ]
+
             m.d.comb += [
-                self.output.valid.eq(selected.valid),
-                self.output.p.eq(selected.p.flit),
-                self.input_ready.bit_select(target, 1).eq(self.output.ready)
+                arb_for[target].valid.eq(arb.output.valid),
+                arb_for[target].p.eq(Array(srcs)[arb.output.p.src]),
+                arb.output.ready.eq(arb_for[target].ready)
             ]
 
-        with m.FSM():
-            with m.State("IDLE"):
-                with m.If(arbiter.requests != 0):
+        for i, input in enumerate(self.inputs):
+            m.d.comb += input.ready.eq(input_ready[i].any())
+
+        output_valid = Array(Signal(PortIdx) for _ in range(PortIdx))
+
+        for name, port in CardinalPort.__members__.items():
+            if port != CardinalPort.local:
+                m.submodules[f"credit_counter_tx_{name}"] = credit_tx = MultiQueueCreditCounterTX(range(PortIdx), Config.N_VC, Config.INPUT_CHANNEL_DEPTH)
+                wiring.connect(m, wiring.flipped(self.credit[self.credit_port_order.index(port)]), credit_tx.credit_in)
+
+            for vc_id in range(Config.N_VC):
+                src_port = Port.const({"port": port, "vc_id": vc_id})
+
+                arb = arb_for[src_port]
+                if port != CardinalPort.local:
+                    wiring.connect(m, arb, credit_tx.input[vc_id])
+                    credit_tx_out = credit_tx.output[vc_id]
                     m.d.comb += [
-                        arbiter.next.eq(1),
-                        target.eq(arbiter.grant),
-                        transfer.eq(1)
+                        output_valid[credit_tx_out.p][self.port_order.index(src_port)].eq(credit_tx_out.valid),
+                        credit_tx_out.ready.eq(Array(self.outputs)[credit_tx_out.p].ready)
                     ]
-                    m.next = "TRANSFER"
-                    with m.If(last_flit_transmitted):
-                        m.next = "IDLE"
-            with m.State("TRANSFER"):
+                else: # local has no credit counting, so always ready
                     m.d.comb += [
-                        target.eq(arbiter.grant_store),
-                        transfer.eq(1)
+                        output_valid[arb.p][self.port_order.index(src_port)].eq(arb.valid),
+                        arb.ready.eq(Array(self.outputs)[arb.p].ready)
                     ]
-                    with m.If(last_flit_transmitted):
-                        m.next = "IDLE"
+
+        for i, output in enumerate(self.outputs):
+            m.d.comb += output.valid.eq(output_valid[i].any())
 
         return m
 
-
-class RouterCrossbar(Component):
-    def __init__(self, should_connect: Callable[[Port, Port], bool] = None):
-        if should_connect is None:
-            self.should_connect = lambda a, b: a.port != b.port
-        self.port_order = list(Port.__members__().values())
-        n_ports = len(self.port_order)
-        super().__init__(wiring.Signature({
-            "inputs": In(RoutedFlitStream).array(n_ports),
-            "outputs": Out(FlitStream).array(n_ports)
-        }))
-
-    def input_for(self, port: Port):
-        return self.inputs[self.port_order.index(port)]
-
-    def output_for(self, port: Port):
-        return self.outputs[self.port_order.index(port)]
+class StreamCrossbarOutput(Component):
+    def __init__(self, n_inputs, target: Port):
+        super().__init__({
+            "inputs": In(stream.Signature(RoutedFlit)).array(n_inputs),
+            "output": Out(FlitWithVCStream),
+            "input_ready": Out(n_inputs)
+        })
+        if isinstance(target, data.Const):
+            target = [target]
+        self._target = target
 
     def elaborate(self, _):
         m = Module()
-        input_readys = defaultdict(list)
+        inputs = self.inputs
+        target = self._target
 
-        for target, output_stream in zip(self.port_order, self.outputs):
+
+        m.submodules["arbiter"] = arb = RRStreamArbiter(FlitWithVC, len(inputs))
+        for i, input in enumerate(inputs):
+            m.d.comb += [
+                arb.input[i].valid.eq(input.valid & Value.cast(input.p.target).matches(*target)),
+                arb.input[i].p.flit.eq(input.p.flit),
+                arb.input[i].p.vc.eq(input.p.target.vc_id),
+                self.input_ready[i].eq(arb.input[i].ready)
+            ]
+
+        m.d.comb += [
+            self.output.valid.eq(arb.output.valid),
+            self.output.p.eq(arb.output.p.p),
+            arb.output.ready.eq(self.output.ready)
+        ]
+
+        return m
+
+class StreamTee(Component):
+    def __init__(self, payload_shape, n_output):
+        super().__init__({
+            "input": In(stream.Signature(payload_shape)),
+            "output": Out(stream.Signature(payload_shape)).array(n_output)
+        })
+
+    def elaborate(self, _):
+        m = Module()
+
+        in_stalled = Signal()
+        new_input = self.input.valid & ~in_stalled
+        stalled = Signal(len(self.output))
+
+        m.d.comb += self.input.ready.eq(~stalled.any())
+        m.d.sync += in_stalled.eq(self.input.valid & ~self.input.ready)
+
+        for i, output in enumerate(self.output):
+            m.d.sync += stalled[i].eq(output.valid & ~output.ready)
+            m.d.comb += [
+                output.valid.eq(new_input | stalled[i]),
+                output.p.eq(self.input.p)
+            ]
+
+        return m
+
+class RouterCrossbar(Component):
+    def __init__(self, should_connect: Callable[[Port, Port], bool] | None = None):
+        if should_connect is None:
+            def sc(a, b):
+                if hasattr(a, "port"):
+                    a = a.port
+                if hasattr(b, "port"):
+                    b = b.port
+                if isinstance(b, typing.Iterable):
+                    values = set(p.port for p in b)
+                    values.discard(a)
+                    return len(values) > 0
+                else:
+                    return a != b
+
+                # lambda a, b: a.port != b.port
+
+
+            self.should_connect = sc
+
+        self.input_port_order = list(Port.__members__().values())
+        self.output_port_order = [p for p in CardinalPort.__members__.values() if p != CardinalPort.local]
+        self.credit_port_order = self.output_port_order
+
+        super().__init__(wiring.Signature({
+            "inputs": In(RoutedFlitStream).array(len(self.input_port_order)),
+            "credit": In(CreditStream(Config.INPUT_CHANNEL_DEPTH, Config.N_VC)).array(len(self.input_port_order)),
+            "cardinal_outputs": Out(FlitWithVCStream).array(len(self.output_port_order)),
+            "local_outputs": Out(FlitStream).array(Config.N_VC)
+        }))
+
+    def credit_for(self, port: CardinalPort):
+        return self.credit[self.credit_port_order.index(port)]
+
+    def input_for(self, port: Port):
+        return self.inputs[self.input_port_order.index(port)]
+
+    def output_for(self, port: CardinalPort | Port):
+        if isinstance(port, CardinalPort):
+            return self.cardinal_outputs[self.output_port_order.index(port)]
+        else:
+            assert port.port == CardinalPort.local
+            return self.local_outputs[port.vc_id]
+
+    def target_output_pairs(self):
+        cardinal_names = [port.name.lower() for port in self.output_port_order]
+        cardinal_ports = [[Port.const({"port": port, "vc_id": vc_id}) for vc_id in range(Config.N_VC)] for port in self.output_port_order]
+        local_ports = [Port.const({"port": CardinalPort.local, "vc_id": vc_id}) for vc_id in range(Config.N_VC)]
+        local_names = [Port.name_for(p) for p in local_ports]
+
+        cardinal_connect = [wiring.connect] * len(cardinal_ports)
+        def local_c(m, i, o):
+            m.d.comb += [o.valid.eq(i.valid), o.p.eq(i.p.flit), i.ready.eq(o.ready)]
+
+        local_connect = [local_c] * len(local_ports)
+
+        yield from zip(cardinal_names, cardinal_ports, self.cardinal_outputs, cardinal_connect)
+        yield from zip(local_names, local_ports, self.local_outputs, local_connect)
+
+    def elaborate(self, _):
+        m = Module()
+
+        m.submodules["vc_allocator"] = alloc = VCAllocator(self.should_connect)
+
+        for credit_in, credit_alloc in zip(self.credit, alloc.credit):
+            wiring.connect(m, wiring.flipped(credit_in), credit_alloc)
+
+
+        cb_input_ports = []
+        for name, port in CardinalPort.__members__.items():
+            m.submodules[f"crossbar_{name}_arb"] = vc_arb = RRStreamArbiter(Flit, Config.N_VC)
+
+            vc_arb_out = stream.Signature(RoutedFlit).create()
+            m.d.comb += [
+                vc_arb_out.valid.eq(vc_arb.output.valid),
+                vc_arb_out.p.eq(vc_arb.output.p.p),
+                vc_arb.output.ready.eq(vc_arb_out.ready)
+            ]
+            cb_input_ports.append((port, vc_arb_out))
+
+            for vc_id in range(Config.N_VC):
+                src_port = Port.const({"port": port, "vc_id": vc_id})
+
+                alloc_in = alloc.inputs[self.input_port_order.index(src_port)]
+                alloc_out = alloc.outputs[self.input_port_order.index(src_port)]
+                input = self.input_for(src_port)
+
+                m.submodules[f"crossbar_{Port.name_for(src_port)}_tee"] = tee = StreamTee(0, 2)
+
+                alloc_output = tee.output[0]
+                arb_output = tee.output[1]
+
+                m.d.comb += [
+                    tee.input.valid.eq(input.valid),
+                    input.ready.eq(tee.input.ready),
+
+                    alloc_in.valid.eq(alloc_output.valid),
+                    alloc_in.p.target.eq(input.p.target),
+                    alloc_in.p.last.eq(input.p.last),
+                    alloc_output.ready.eq(alloc_in.ready),
+
+                    vc_arb.input[vc_id].valid.eq(alloc_out.valid & arb_output.valid),
+                    vc_arb.input[vc_id].p.eq(input.p),
+
+                    alloc_out.ready.eq(vc_arb.input[vc_id].ready & arb_output.valid),
+                    arb_output.ready.eq(vc_arb.input[vc_id].ready & alloc_out.valid)
+                ]
+
+        input_readys = defaultdict(list)
+        for name, target, output_stream, connect in self.target_output_pairs():
             inputs_for_output = list(
-                input for (src, input) in zip(self.port_order, self.inputs) if self.should_connect(src, target)
+                input for (src, input) in cb_input_ports if self.should_connect(src, target)
             )
-            output = m.submodules[f"crossbar_output_{Port.name_for(target)}"] = PacketizedStreamCrossbarOutput(inputs_for_output, target)
-            wiring.connect(m, output.output, wiring.flipped(output_stream))
+            output = m.submodules[f"crossbar_output_{name}"] = StreamCrossbarOutput(len(inputs_for_output), target)
 
             for i, input in enumerate(inputs_for_output):
-                # TODO: remove once https://github.com/amaranth-lang/amaranth/pull/1580 is merged
-                input_readys[wiring.flipped(input)].append(output.input_ready[i])
+                wiring.connect(m, output.inputs[i], input)
+            connect(m, output.output, wiring.flipped(output_stream))
 
-        for i, input in enumerate(self.inputs):
-            m.d.comb += input.ready.eq(sum(input_readys[wiring.flipped(input)])[0])
+            for i, input in enumerate(inputs_for_output):
+                input_readys[input].append(output.input_ready[i])
+
+        for _, input in cb_input_ports:
+            # print(input_readys[input], input)
+            m.d.comb += input.ready.eq(sum(input_readys[input])[0])
 
         return m
 
@@ -427,56 +607,57 @@ class MemoryMappedRouter(Component):
     local_out: Out(FlitStream).array(Config.N_VC)
 
     north_in: In(FlitStream).array(Config.N_VC)
-    north_out: Out(FlitStream).array(Config.N_VC)
+    north_out: Out(FlitWithVCStream)
+    north_credit_in: In(CreditStream(Config.INPUT_CHANNEL_DEPTH, Config.N_VC))
     south_in: In(FlitStream).array(Config.N_VC)
-    south_out: Out(FlitStream).array(Config.N_VC)
+    south_out: Out(FlitWithVCStream)
+    south_credit_in: In(CreditStream(Config.INPUT_CHANNEL_DEPTH, Config.N_VC))
     east_in: In(FlitStream).array(Config.N_VC)
-    east_out: Out(FlitStream).array(Config.N_VC)
+    east_out: Out(FlitWithVCStream)
+    east_credit_in: In(CreditStream(Config.INPUT_CHANNEL_DEPTH, Config.N_VC))
     west_in: In(FlitStream).array(Config.N_VC)
-    west_out: Out(FlitStream).array(Config.N_VC)
+    west_out: Out(FlitWithVCStream)
+    west_credit_in: In(CreditStream(Config.INPUT_CHANNEL_DEPTH, Config.N_VC))
 
     cfg: In(MemoryMappedRouterConfig)
 
     def in_port(self, port: Port):
         return getattr(self, f"{port.port.name.lower()}_in")[port.vc_id]
 
-    def out_port(self, port: Port):
-        return getattr(self, f"{port.port.name.lower()}_out")[port.vc_id]
+    def credit_port(self, port: CardinalPort):
+        return getattr(self, f"{port.name.lower()}_credit_in")
 
-    # def in_ports(self):
-    #     for port in Port.__members__.values():
-    #         yield self.in_port(port)
+    def credit_ports(self):
+        for port in CardinalPort.__members__.values():
+            if port != CardinalPort.local:
+                yield (port, self.credit_port(port))
 
-    # def out_ports(self):
-    #     for port in Port.__members__.values():
-    #         yield self.out_port(port)
+    def out_port(self, port: CardinalPort | Port):
+        if isinstance(port, CardinalPort):
+            return getattr(self, f"{port.name.lower()}_out")
+        else:
+            assert port.port == CardinalPort.local
+            return getattr(self, f"{port.port.name.lower()}_out")[port.vc_id]
 
-    # def port_pairs(self):
-    #     for port in Port.__members__.values():
-    #         yield (self.in_port(port), self.out_port(port))
+    def in_ports(self):
+        for name, port in Port.__members__().items():
+            yield (name.lower(), self.in_port(port), port)
 
-    # def port_name_pairs(self):
-    #     for port_name, port in Port.__members__.items():
-    #         yield (port_name, self.in_port(port), self.out_port(port))
+    def out_ports(self):
+        for name, port in CardinalPort.__members__.items():
+            if port != CardinalPort.local:
+                yield (name.lower(), self.out_port(port), port)
 
-    def port_name_direction_pairs(self):
-        for port_name, port in Port.__members__().items():
-            yield (port_name, self.in_port(port), self.out_port(port), port)
+        for vc_id in range(Config.N_VC):
+            port = Port.const({"port": CardinalPort.local, "vc_id": vc_id})
+            yield (Port.name_for(port), self.out_port(port), port)
 
     def elaborate(self, _):
         m = Module()
 
         m.submodules.crossbar = crossbar = RouterCrossbar()
 
-        for name, in_port, out_port, port in self.port_name_direction_pairs():
-            crossbar_out = crossbar.output_for(port)
-
-            # output path: put a FIFO after the crossbar output
-            crossbar_out_buffer = m.submodules[f"{name}_crossbar_output_fifo"] = StreamFIFO(crossbar_out, depth=Config.CROSSBAR_OUTPUT_FIFO_DEPTH)
-            wiring.connect(m, crossbar_out, crossbar_out_buffer.w_stream)
-            wiring.connect(m, crossbar_out_buffer.r_stream, wiring.flipped(out_port))
-
-
+        for name, in_port, port in self.in_ports():
             # input path: InputChannel -> FIFO -> Crossbar
             channel = m.submodules[f"{name}_input_channel"] = InputChannel(port.vc_id, name)
             # print(channel.route_computer_cfg, self.cfg.route_computer_cfg)
@@ -489,6 +670,18 @@ class MemoryMappedRouter(Component):
 
             crossbar_in = crossbar.input_for(port)
             wiring.connect(m, crossbar_in_buffer.r_stream, crossbar_in)
+
+        for port, credit_port in self.credit_ports():
+            wiring.connect(m, wiring.flipped(credit_port), crossbar.credit_for(port))
+
+
+        for name, out_port, port in self.out_ports():
+            crossbar_out = crossbar.output_for(port)
+
+            # output path: put a FIFO after the crossbar output
+            crossbar_out_buffer = m.submodules[f"{name}_crossbar_output_fifo"] = StreamFIFO(crossbar_out, depth=Config.CROSSBAR_OUTPUT_FIFO_DEPTH)
+            wiring.connect(m, crossbar_out, crossbar_out_buffer.w_stream)
+            wiring.connect(m, crossbar_out_buffer.r_stream, wiring.flipped(out_port))
 
 
         mark_debug(self.local_in, self.local_out)
