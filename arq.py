@@ -338,26 +338,24 @@ class ArqReceiver(Component):
         ]
 
         nack_scheduled = Signal()
-        next_nack_scheduled = Signal()
-
-        m.d.comb += next_nack_scheduled.eq(nack_scheduled)
         with m.If(self.input.valid & input_seq_valid):
-            m.d.comb += next_nack_scheduled.eq(0)
-        m.d.sync += nack_scheduled.eq(next_nack_scheduled)
+            m.d.sync += nack_scheduled.eq(0)
 
-        m.d.comb += self.ack.p.is_nack.eq(next_nack_scheduled)
+        m.d.comb += self.ack.p.is_nack.eq(nack_scheduled)
+
+        m.d.sync += self.ack.trigger.eq(0)
 
         def send_ack(m, is_nack: bool, seq = None):
             m.d.sync += timeout_counter.eq(timeout_max)
-            if seq is not None:
-                m.d.comb += self.ack.p.seq.eq(seq)
+            # if seq is not None:
+            #     m.d.comb += self.ack.p.seq.eq(seq)
             if is_nack:
-                m.d.comb += [
+                m.d.sync += [
                     self.ack.trigger.eq(~nack_scheduled),
-                    next_nack_scheduled.eq(1)
+                    nack_scheduled.eq(1)
                 ]
             else:
-                m.d.comb += [self.ack.trigger.eq(1)]
+                m.d.sync += self.ack.trigger.eq(1)
 
         # normal ack flow: ack every n'th word
         word_counter = Signal(range(self.words_per_ack))

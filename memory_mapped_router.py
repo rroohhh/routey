@@ -37,6 +37,22 @@ class StreamFIFO(Component):
         m = Module()
         if self.depth == 0:
             wiring.connect(m, wiring.flipped(self.r_stream), wiring.flipped(self.w_stream))
+        elif self.depth == 1:
+            buffer = Signal.like(self.w_stream.p, reset_less = True)
+            buffer_valid = Signal()
+
+            with m.If(self.r_stream.ready & self.r_stream.valid):
+                m.d.sync += buffer_valid.eq(0)
+
+            with m.If(self.w_stream.ready & self.w_stream.valid):
+                m.d.sync += buffer.eq(self.w_stream.p)
+                m.d.sync += buffer_valid.eq(1)
+
+            m.d.comb += [
+                self.w_stream.ready.eq(~buffer_valid | self.r_stream.ready),
+                self.r_stream.valid.eq(buffer_valid),
+                self.r_stream.p.eq(buffer)
+            ]
         else:
             fifo = m.submodules.fifo = SyncFIFOAmaranth(width=len(self.r_stream.p.as_value()), depth=self.depth)
             wiring.connect(m, wiring.flipped(self.r_stream), fifo.r_stream)
@@ -52,10 +68,12 @@ class Config:
 
     # 64 bit payload + 8 bit byteen
     FLIT_SIZE = 64 + 8
-    # MUX_COUNT = 5
     COORD_BITS = 6
 
     LINK_COUNT = 4 # one for each cardinal direction
+
+    MUX_COUNT = 5
+    LINK_BITS = 18
 
     # calculate link bits from flit size
     # 3 bits tag
@@ -64,6 +82,7 @@ class Config:
     # MUX_COUNT * 2 bits for link id
     # LINK_BITS = int(ceil((FLIT_SIZE + 3 + 8 + 8 + (MUX_COUNT * 2)) / (2 * MUX_COUNT)) * 2)
 
+    LOCAL_INPUT_FIFO_DEPTH = 2
     INPUT_CHANNEL_FIFO_DEPTH = 1
     INPUT_CHANNEL_OUTPUT_FIFO_DEPTH = 0
     INPUT_CHANNEL_ROUTE_PIPELINE_DEPTH = INPUT_CHANNEL_FIFO_DEPTH
@@ -355,7 +374,7 @@ class VCAllocator(Component):
 
         arb_for = EqDefaultDict(lambda: stream.Signature(Port).create())
 
-        input_ready = Array(Signal(PortIdx) for _ in range(PortIdx))
+        input_ready = [[] for _ in range(PortIdx)]
 
         for target in self.port_order:
             srcs, inputs_for_arb = list(zip(*list(
@@ -367,8 +386,8 @@ class VCAllocator(Component):
                 m.d.comb += [
                     arb.input[i].valid.eq(input.valid & (input.p.target == target)),
                     arb.input[i].p.eq(input.p.last),
-                    input_ready[input_idx][self.port_order.index(target)].eq(arb.input[i].ready)
                 ]
+                input_ready[input_idx].append(arb.input[i].ready & arb.input[i].valid)
 
             m.d.comb += [
                 arb_for[target].valid.eq(arb.output.valid),
@@ -377,7 +396,7 @@ class VCAllocator(Component):
             ]
 
         for i, input in enumerate(self.inputs):
-            m.d.comb += input.ready.eq(input_ready[i].any())
+            m.d.comb += input.ready.eq(Cat(input_ready[i]).any())
 
         output_valid = Array(Signal(PortIdx) for _ in range(PortIdx))
 
@@ -410,11 +429,11 @@ class VCAllocator(Component):
 
 class StreamCrossbarOutput(Component):
     def __init__(self, n_inputs, target: Port):
-        super().__init__({
+        super().__init__(wiring.Signature({
             "inputs": In(stream.Signature(RoutedFlit)).array(n_inputs),
             "output": Out(FlitWithVCStream),
             "input_ready": Out(n_inputs)
-        })
+        }))
         if isinstance(target, data.Const):
             target = [target]
         self._target = target
@@ -444,10 +463,10 @@ class StreamCrossbarOutput(Component):
 
 class StreamTee(Component):
     def __init__(self, payload_shape, n_output):
-        super().__init__({
+        super().__init__(wiring.Signature({
             "input": In(stream.Signature(payload_shape)),
             "output": Out(stream.Signature(payload_shape)).array(n_output)
-        })
+        }))
 
     def elaborate(self, _):
         m = Module()
@@ -455,12 +474,14 @@ class StreamTee(Component):
         in_stalled = Signal()
         new_input = self.input.valid & ~in_stalled
         stalled = Signal(len(self.output))
+        next_stalled = Signal(len(self.output))
+        m.d.sync += stalled.eq(next_stalled)
 
-        m.d.comb += self.input.ready.eq(~stalled.any())
+        m.d.comb += self.input.ready.eq(~next_stalled.any())
         m.d.sync += in_stalled.eq(self.input.valid & ~self.input.ready)
 
         for i, output in enumerate(self.output):
-            m.d.sync += stalled[i].eq(output.valid & ~output.ready)
+            m.d.comb += next_stalled[i].eq(output.valid & ~output.ready)
             m.d.comb += [
                 output.valid.eq(new_input | stalled[i]),
                 output.p.eq(self.input.p)
@@ -538,9 +559,9 @@ class RouterCrossbar(Component):
 
         cb_input_ports = []
         for name, port in CardinalPort.__members__.items():
-            m.submodules[f"crossbar_{name}_arb"] = vc_arb = RRStreamArbiter(Flit, Config.N_VC)
+            m.submodules[f"crossbar_{name}_arb"] = vc_arb = RRStreamArbiter(RoutedFlit, Config.N_VC)
 
-            vc_arb_out = stream.Signature(RoutedFlit).create()
+            vc_arb_out = stream.Signature(RoutedFlit).create(path=[name])
             m.d.comb += [
                 vc_arb_out.valid.eq(vc_arb.output.valid),
                 vc_arb_out.p.eq(vc_arb.output.p.p),
@@ -707,7 +728,7 @@ async def send_packet(ctx, port, target, n_payload):
             ctx.set(port.payload.data.start_and_end.payload, i)
             ctx.set(port.payload.data.start_and_end.target.target.x, target[0])
             ctx.set(port.payload.data.start_and_end.target.target.y, target[1])
-            ctx.set(port.payload.data.start_and_end.target.vc, target[2])
+            # ctx.set(port.payload.data.start_and_end.target.vc, target[2])
         else:
             ctx.set(port.payload.data.payload.payload, i)
         await ctx.tick().until(port.ready & port.valid)
@@ -724,26 +745,37 @@ def sim():
     for x in range(grid_size):
         for y in range(grid_size):
             router = m.submodules[f"router_{x}_{y}"] = routers[x][y]
-            m.d.comb += [
-                router.cfg.route_computer_cfg.position.x.eq(x),
-                router.cfg.route_computer_cfg.position.y.eq(y)
-            ]
+            for port in Port.__members__().values():
+                m.d.comb += [
+                    getattr(router.cfg, f"{Port.name_for(port)}_route_computer_cfg").position.x.eq(x),
+                    getattr(router.cfg, f"{Port.name_for(port)}_route_computer_cfg").position.y.eq(y)
+                ]
             routers[x][y] = router
+
+    def conn(m, a, b):
+        readys = Signal(Config.N_VC)
+        for vc in range(Config.N_VC):
+            m.d.comb += [
+                b[vc].valid.eq(a.valid & (a.p.vc == vc)),
+                b[vc].p.eq(a.p.flit),
+                readys[vc].eq(b[vc].valid & b[vc].ready)
+            ]
+        m.d.comb += a.ready.eq(readys.any())
 
     for x in range(grid_size):
         for y in range(grid_size):
             if x > 0:
-                for port_a, port_b in zip(routers[x][y].west_out, routers[x - 1][y].east_in):
-                    wiring.connect(m, port_a, port_b)
+                # for port_a, port_b in zip(routers[x][y].west_out, routers[x - 1][y].east_in):
+                conn(m, routers[x][y].west_out, routers[x - 1][y].east_in)
             if x < (grid_size - 1):
-                for port_a, port_b in zip(routers[x][y].east_out, routers[x + 1][y].west_in):
-                    wiring.connect(m, port_a, port_b)
+                # for port_a, port_b in zip(routers[x][y].east_out, routers[x + 1][y].west_in):
+                conn(m, routers[x][y].east_out, routers[x + 1][y].west_in)
             if y > 0:
-                for port_a, port_b in zip(routers[x][y].north_out, routers[x][y - 1].south_in):
-                    wiring.connect(m, port_a, port_b)
+                # for port_a, port_b in zip(routers[x][y].north_out, routers[x][y - 1].south_in):
+                conn(m, routers[x][y].north_out, routers[x][y - 1].south_in)
             if y < (grid_size - 1):
-                for port_a, port_b in zip(routers[x][y].south_out, routers[x][y + 1].north_in):
-                    wiring.connect(m, port_a, port_b)
+                # for port_a, port_b in zip(routers[x][y].south_out, routers[x][y + 1].north_in):
+                conn(m, routers[x][y].south_out, routers[x][y + 1].north_in)
 
     dut = m
 
@@ -787,8 +819,8 @@ def sim():
 
     sim = Simulator(dut)
     sim.add_clock(Period(MHz=100))
-    sim.add_process(write_packets(routers[0][0].local_in[0], (1, 1, 1), 10))
-    sim.add_process(write_packets(routers[0][0].local_in[1], (1, 1, 0), 10))
+    sim.add_process(write_packets(routers[0][0].local_in[0], (0, 1, 0), 1))
+    sim.add_process(write_packets(routers[0][0].local_in[1], (1, 1, 0), 1))
     # sim.add_process(write_packets(routers[0][0].west_in, (1, 0), 3))
 
     with sim.write_vcd("test.vcd"):

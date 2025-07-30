@@ -8,7 +8,7 @@ from amaranth.lib.wiring import Component, In, Out
 from arq import AckLayout, AckSignature, ArqPayloadLayout, ArqReceiver, ArqSender, CreditLayout, CreditRXSignature, MultiQueueCreditCounterRX, MultiQueueFIFO, MultiQueueFifoReader, RRStreamArbiter, CreditStream
 from debug_utils import event_annotation
 from format_utils import add_formatting_attrs
-from memory_mapped_router import Config, Flit, FlitStream, FlitWithVC, FlitWithVCStream, MemoryMappedRouter, MemoryMappedRouterConfig, Port
+from memory_mapped_router import Config, Flit, FlitStream, FlitWithVC, FlitWithVCStream, MemoryMappedRouter, MemoryMappedRouterConfig, Port, StreamFIFO
 from memory_mapped_router_types import CardinalPort
 from trace_signal_flow import trace_signal_flow
 
@@ -263,8 +263,11 @@ class RouterTop(Component):
         router = m.submodules.router = MemoryMappedRouter()
         wiring.connect(m, wiring.flipped(self.cfg), router.cfg)
 
-        for r_l_in, l_in in zip(router.local_in, self.local_in):
-            wiring.connect(m, r_l_in, wiring.flipped(l_in))
+        for i, (r_l_in, l_in) in enumerate(zip(router.local_in, self.local_in)):
+            m.submodules[f"input_fifo_{i}"] = fifo = StreamFIFO(l_in, depth=Config.LOCAL_INPUT_FIFO_DEPTH)
+            wiring.connect(m, fifo.w_stream, wiring.flipped(l_in))
+            wiring.connect(m, r_l_in, fifo.r_stream)
+
         for r_l_out, l_out in zip(router.local_out, self.local_out):
             wiring.connect(m, r_l_out, wiring.flipped(l_out))
 
