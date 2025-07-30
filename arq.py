@@ -1,4 +1,4 @@
-from debug_utils import mark_debug
+from debug_utils import event_annotation, mark_debug, span_annotation
 from round_robin_arbiter import RoundRobinArbiter
 from utils import assertFormal
 from formal_utils import FormalScoreboard, FormalScoreboardWolper, AXISStreamContract
@@ -189,6 +189,20 @@ class ArqSender(Component):
                 trigger_resend()
 
         m.d.sync += send_ptr.eq(next_send_ptr)
+
+        # debug annotations
+        ack_recieved = Signal()
+        nack_recieved = Signal()
+        timeout_occured_debug = Signal()
+        m.d.comb += [
+            ack_recieved.eq(self.ack.valid & self.ack.ready & ~self.ack.p.is_nack),
+            nack_recieved.eq(self.ack.valid & self.ack.ready & self.ack.p.is_nack),
+            timeout_occured_debug.eq(timeout_occured)
+        ]
+        event_annotation(ack_recieved, "ack recieved")
+        event_annotation(ack_recieved, "nack recieved")
+        event_annotation(timeout_occured_debug, "ack timeout")
+        span_annotation(is_resend, "resending")
 
 
         outstanding = Signal.like(read_ptr)
@@ -402,6 +416,10 @@ class ArqReceiver(Component):
         with m.If(self.input_error):
             send_ack(m, True)
 
+        timeout_occured = Signal()
+        m.d.comb += timeout_occured.eq(timeout_counter == 0)
+        span_annotation(self.input_error, "input error")
+        event_annotation(timeout_occured, "ack send timeout")
         return m
 
     @staticmethod
@@ -623,7 +641,6 @@ class MultiQueueFIFO(Component):
         write_ptrs = [Signal(range(2 * self.depth), name = f"write_ptr_{i}") for i in range(self.n_queues)]
         out_regs = [Signal.like(self.input.p, name = f"out_reg_{i}", reset_less=True) for i in range(self.n_queues)]
         out_reg_filleds = [Signal(name = f"out_reg_filled_{i}") for i in range(self.n_queues)]
-
 
         outstanding = [Signal.like(read_ptrs[i], name = f"outstanding_{i}") for i in range(self.n_queues)]
         for o, r, w in zip(outstanding, read_ptrs, write_ptrs):

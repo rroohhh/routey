@@ -5,7 +5,13 @@ from amaranth import Value, ValueCastable
 from amaranth.lib import wiring
 from amaranth.lib.wiring import FlippedInterface
 
-def mark_debug(*args):
+def span_annotation(thing, text):
+    mark_debug(thing, span_annotation=1, annotation_text=text)
+
+def event_annotation(thing, text):
+    mark_debug(thing, event_annotation=1, annotation_text=text)
+
+def mark_debug(*args, **extra_attrs):
     for arg in args:
         if isinstance(arg, stream.Interface):
             mark_debug(arg.ready, arg.valid, arg.p)
@@ -15,6 +21,7 @@ def mark_debug(*args):
             mark_debug(Value.cast(arg))
         elif isinstance(arg, Value):
             arg.attrs["debug_item"] = 1
+            arg.attrs.update(extra_attrs)
         elif isinstance(arg, list):
             mark_debug(*arg)
         else:

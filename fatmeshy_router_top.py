@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 
 
-from amaranth import Const, Module, Mux, Signal, Value, ValueCastable
-from amaranth.back import rtlil
-from amaranth.hdl._ir import  PortDirection
+from amaranth import Module, Mux, Signal
 from amaranth.back.rtlil import convert
 from amaranth.lib import data, stream, wiring
 from amaranth.lib.wiring import Component, In, Out
-from arq import AckLayout, AckSignature, ArqPayloadLayout, ArqReceiver, ArqSender, CreditLayout, CreditRXSignature, CreditStream, MultiQueueCreditCounterRX, MultiQueueCreditCounterTX, MultiQueueFIFO, MultiQueueFifoReader, RRStreamArbiter
+from arq import AckLayout, AckSignature, ArqPayloadLayout, ArqReceiver, ArqSender, CreditLayout, CreditRXSignature, MultiQueueCreditCounterRX, MultiQueueFIFO, MultiQueueFifoReader, RRStreamArbiter, CreditStream
+from debug_utils import event_annotation
 from format_utils import add_formatting_attrs
 from memory_mapped_router import Config, Flit, FlitStream, FlitWithVC, FlitWithVCStream, MemoryMappedRouter, MemoryMappedRouterConfig, Port
 from memory_mapped_router_types import CardinalPort
-from TSMC65Platform import TSMC65Platform
 from trace_signal_flow import trace_signal_flow
 
 ArqPayload = ArqPayloadLayout(FlitWithVC, Config.ARQ_WINDOW_SIZE)
@@ -113,6 +111,16 @@ class LinkMux(Component):
             self.link_out.p.eq(arbiter.output.p.p),
             arbiter.output.ready.eq(self.link_out.ready)
         ]
+
+        # debug annotations
+        ack_sent = Signal()
+        nack_sent = Signal()
+        m.d.comb += [
+            ack_sent.eq(arb_in_1.ready & arb_in_1.valid & ~arb_in_1.p.p.flit.data.arq_ack.is_nack),
+            nack_sent.eq(arb_in_1.ready & arb_in_1.valid & arb_in_1.p.p.flit.data.arq_ack.is_nack)
+        ]
+        event_annotation(ack_sent, "ack sent")
+        event_annotation(ack_sent, "nack sent")
 
         return m
 

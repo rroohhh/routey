@@ -88,7 +88,8 @@ def trace_signal_flow(m: Module, ty, accessor = lambda s: s):
 
     comp = frag.origins[0]
     for _, _, sig in comp.signature.flatten(comp):
-        ports.append(Value.cast(sig))
+        if not isinstance(sig, Const):
+            ports.append(Value.cast(sig))
 
     for i, (path, flow, sig_path, sig, valid_sig, ready_sig) in enumerate(vis.sample_points):
         # print(path, sig_path, sig, valid_sig, ready_sig)
