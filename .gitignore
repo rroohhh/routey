@@ -5,3 +5,5 @@ xrun.log
 xrun.history
 gen
 __pycache__
+sourcelist*.slst
+*.vcd

@@ -2,37 +2,38 @@ FORMAL_TASKS=arq arq_sender arq_receiver multi_queue multi_queue_reader rr_strea
 
 N_QUEUES=2
 PAYLOAD_SHAPE=1
-WINDOW_SIZE=4
+WINDOW_SIZE=2
+ACKS_PER_WINDOW=1
 FIFO_SIZE=8
 
 $(abspath rr_stream_arbiter.sv): ../arq.py ../autowrap.py
-	uv --directory ../ run autowrap.py -i 'arq.RRStreamArbiter(payload_shape=$(PAYLOAD_SHAPE),n_queues=$(N_QUEUES))' > $@
+	uv --directory ../ run autowrap.py --platform sim -i 'arq.RRStreamArbiter(payload_shape=$(PAYLOAD_SHAPE),n_queues=$(N_QUEUES))' > $@
 
 $(abspath lwwreg.sv): ../arq.py ../autowrap.py
-	uv --directory ../ run autowrap.py -i 'arq.LWWReg(payload_shape=data.ArrayLayout(arq.CreditShape(depth=$(FIFO_SIZE)),$(N_QUEUES)))' > $@
+	uv --directory ../ run autowrap.py --platform sim -i 'arq.LWWReg(payload_shape=data.ArrayLayout(arq.CreditShape(depth=$(FIFO_SIZE)),$(N_QUEUES)))' > $@
 
 $(abspath multi_queue_credit_counter_tx.sv): ../arq.py ../autowrap.py
-	uv --directory ../ run autowrap.py -i 'arq.MultiQueueCreditCounterTX(payload_shape=$(PAYLOAD_SHAPE),n_queues=$(N_QUEUES),depth=$(FIFO_SIZE))' > $@
+	uv --directory ../ run autowrap.py --platform sim -i 'arq.MultiQueueCreditCounterTX(payload_shape=$(PAYLOAD_SHAPE),n_queues=$(N_QUEUES),depth=$(FIFO_SIZE))' > $@
 
 $(abspath multi_queue_credit_counter_rx.sv): ../arq.py ../autowrap.py
-	uv --directory ../ run autowrap.py -i 'arq.MultiQueueCreditCounterRX(payload_shape=$(PAYLOAD_SHAPE),n_queues=$(N_QUEUES),depth=$(FIFO_SIZE))' > $@
+	uv --directory ../ run autowrap.py --platform sim -i 'arq.MultiQueueCreditCounterRX(payload_shape=$(PAYLOAD_SHAPE),n_queues=$(N_QUEUES),depth=$(FIFO_SIZE))' > $@
 
 $(abspath multi_fifo.sv): ../arq.py ../autowrap.py
-	uv --directory ../ run autowrap.py -i 'arq.MultiQueueFIFO(payload_shape=$(PAYLOAD_SHAPE),n_queues=$(N_QUEUES),depth=$(FIFO_SIZE))' > $@
+	uv --directory ../ run autowrap.py --platform sim -i 'arq.MultiQueueFIFO(payload_shape=$(PAYLOAD_SHAPE),n_queues=$(N_QUEUES),depth=$(FIFO_SIZE))' > $@
 
 $(abspath multi_fifo_reader.sv): ../arq.py ../autowrap.py
-	uv --directory ../ run autowrap.py -i 'arq.MultiQueueFifoReader(payload_shape=$(PAYLOAD_SHAPE),n_queues=$(N_QUEUES))' > $@
+	uv --directory ../ run autowrap.py --platform sim -i 'arq.MultiQueueFifoReader(payload_shape=$(PAYLOAD_SHAPE),n_queues=$(N_QUEUES))' > $@
 
 $(abspath arq_sender.sv): ../arq.py ../autowrap.py
-	uv --directory ../ run autowrap.py -i 'arq.ArqSender(payload_shape=$(PAYLOAD_SHAPE),window_size=$(WINDOW_SIZE))' > $@
+	uv --directory ../ run autowrap.py --platform sim -i 'arq.ArqSender(payload_shape=$(PAYLOAD_SHAPE),window_size=$(WINDOW_SIZE))' > $@
 
 $(abspath arq_receiver.sv): ../arq.py ../autowrap.py
-	uv --directory ../ run autowrap.py -i 'arq.ArqReceiver(payload_shape=$(PAYLOAD_SHAPE),window_size=$(WINDOW_SIZE),acks_per_window=2)' > $@
+	uv --directory ../ run autowrap.py --platform sim -i 'arq.ArqReceiver(payload_shape=$(PAYLOAD_SHAPE),window_size=$(WINDOW_SIZE),acks_per_window=$(ACKS_PER_WINDOW))' > $@
 
 $(abspath input_channel.sv): ../memory_mapped_router.py ../autowrap.py
-	uv --directory ../ run autowrap.py -i 'memory_mapped_router.InputChannel(vc=0, name="local")' > $@
+	uv --directory ../ run autowrap.py --platform sim -i 'memory_mapped_router.InputChannel(vc=0, name="local")' > $@
 
 $(abspath router_crossbar.sv): ../memory_mapped_router.py ../autowrap.py
-	uv --directory ../ run autowrap.py -i 'memory_mapped_router.RouterCrossbar()' > $@
+	uv --directory ../ run autowrap.py --platform sim -i 'memory_mapped_router.RouterCrossbar()' > $@
 
 include ../../../../visionary-rtl-utils/formal/formal.mk

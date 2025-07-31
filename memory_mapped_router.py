@@ -372,7 +372,8 @@ class VCAllocator(Component):
 
         PortIdx = len(self.port_order)
 
-        arb_for = EqDefaultDict(lambda: stream.Signature(Port).create())
+        arb_for = EqDefaultDict(lambda: stream.Signature(range(PortIdx)).create())
+        inputs_for = EqDefaultDict(list)
 
         input_ready = [[] for _ in range(PortIdx)]
 
@@ -381,6 +382,9 @@ class VCAllocator(Component):
                 (i, input) for i, (src, input) in enumerate(zip(self.port_order, self.inputs)) if self.should_connect(src, target)
             )))
             m.submodules[f"credit_counter_tx_{Port.name_for(target)}_arb"] = arb = RRStreamLastArbiter(len(inputs_for_arb))
+
+            # print(Port.name_for(target), srcs)
+            inputs_for[target] = srcs
 
             for i, (input_idx, input) in enumerate(zip(srcs, inputs_for_arb)):
                 m.d.comb += [
@@ -398,7 +402,7 @@ class VCAllocator(Component):
         for i, input in enumerate(self.inputs):
             m.d.comb += input.ready.eq(Cat(input_ready[i]).any())
 
-        output_valid = Array(Signal(PortIdx) for _ in range(PortIdx))
+        output_valid = [[] for _ in range(PortIdx)]
 
         for name, port in CardinalPort.__members__.items():
             if port != CardinalPort.local:
@@ -412,18 +416,26 @@ class VCAllocator(Component):
                 if port != CardinalPort.local:
                     wiring.connect(m, arb, credit_tx.input[vc_id])
                     credit_tx_out = credit_tx.output[vc_id]
+
+                    p = credit_tx_out.p
+                    valid = credit_tx_out.valid
                     m.d.comb += [
-                        output_valid[credit_tx_out.p][self.port_order.index(src_port)].eq(credit_tx_out.valid),
                         credit_tx_out.ready.eq(Array(self.outputs)[credit_tx_out.p].ready)
                     ]
                 else: # local has no credit counting, so always ready
+                    p = arb.p
+                    valid = arb.valid
                     m.d.comb += [
-                        output_valid[arb.p][self.port_order.index(src_port)].eq(arb.valid),
                         arb.ready.eq(Array(self.outputs)[arb.p].ready)
                     ]
 
+                # print(Port.name_for(src_port), inputs_for[src_port])
+                for input in inputs_for[src_port]:
+                    # print(input, p)
+                    output_valid[input].append(valid & (p == input))
+
         for i, output in enumerate(self.outputs):
-            m.d.comb += output.valid.eq(output_valid[i].any())
+            m.d.comb += output.valid.eq(Cat(output_valid[i]).any())
 
         return m
 
@@ -490,7 +502,7 @@ class StreamTee(Component):
         return m
 
 class RouterCrossbar(Component):
-    def __init__(self, should_connect: Callable[[Port, Port], bool] | None = None):
+    def __init__(self, should_connect: Callable[[Port, Port], bool] = None):
         if should_connect is None:
             def sc(a, b):
                 if hasattr(a, "port"):
@@ -526,7 +538,7 @@ class RouterCrossbar(Component):
     def input_for(self, port: Port):
         return self.inputs[self.input_port_order.index(port)]
 
-    def output_for(self, port: CardinalPort | Port):
+    def output_for(self, port: CardinalPort):
         if isinstance(port, CardinalPort):
             return self.cardinal_outputs[self.output_port_order.index(port)]
         else:
@@ -653,7 +665,7 @@ class MemoryMappedRouter(Component):
             if port != CardinalPort.local:
                 yield (port, self.credit_port(port))
 
-    def out_port(self, port: CardinalPort | Port):
+    def out_port(self, port: CardinalPort):
         if isinstance(port, CardinalPort):
             return getattr(self, f"{port.name.lower()}_out")
         else:

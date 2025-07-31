@@ -1,7 +1,7 @@
 `default_nettype none
 
 module arq_formal #(
-	parameter int link_delay = 2
+	parameter int link_delay = 4
 ) (
 	input wire clk, rst,
     arq_sender_in_stream_if in,

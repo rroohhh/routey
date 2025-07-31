@@ -70,7 +70,7 @@ def gen_types(tys):
             typedef += f"package {name}_pkg;\n"
             typedef += f"typedef enum {type_to_name(shape)} {{\n"
             typedef += ",\n".join(f"{indent}{name.upper()} = {value.value}" for name, value in ty.__members__.items()) + "\n"
-            typedef += f"}} {name}_t;\n"
+            typedef += f"}} {name};\n"
             typedef += f"endpackage"
             # typedef += f"import {name}::{name};"
         else:
