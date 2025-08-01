@@ -397,7 +397,9 @@ class ArqReceiver(Component):
 
         with m.If(self.ack.did_trigger):
             m.d.sync += [
-                word_counter.eq(0),
+                # if we are sending an ack right now, we could also just this moment receive an word,
+                # so we could have this one unacked word
+                word_counter.eq(push & input_seq_valid),
                 timeout_counter.eq(timeout_max)
             ]
 
