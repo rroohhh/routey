@@ -345,7 +345,7 @@ class ArqReceiver(Component):
 
         m.d.sync += self.ack.trigger.eq(0)
 
-        def send_ack(m, is_nack: bool, seq = None):
+        def send_ack(m, is_nack: bool):
             m.d.sync += timeout_counter.eq(timeout_max)
             # if seq is not None:
             #     m.d.comb += self.ack.p.seq.eq(seq)
@@ -380,9 +380,7 @@ class ArqReceiver(Component):
         with m.If(push & input_seq_valid):
             with m.If(word_counter == (self.words_per_ack - 1)):
                 m.d.sync += word_counter.eq(0)
-                # send with the expected seq,
-                # last_seq only gets updated next cycle
-                send_ack(m, False, expected_seq)
+                send_ack(m, False)
             with m.Else():
                 m.d.sync += word_counter.eq(word_counter + 1)
 
@@ -393,7 +391,9 @@ class ArqReceiver(Component):
                 send_ack(m, True)
             # if they are out of window, send a ack, the sender seems to resend unnecessaryily
             with m.Elif(~input_seq_valid):
-                send_ack(m, False) # TODO(robin): throttle these?
+                # only send if no nack is scheduled, if one is schedule a up to date nack is already underway
+                with m.If(~nack_scheduled):
+                    send_ack(m, False) # TODO(robin): throttle these?
 
         with m.If(self.ack.did_trigger):
             m.d.sync += [
