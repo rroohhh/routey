@@ -440,7 +440,7 @@ class VCAllocator(Component):
         return m
 
 class StreamCrossbarOutput(Component):
-    def __init__(self, n_inputs, target: Port):
+    def __init__(self, n_inputs, target: Port, needs_arb=True):
         super().__init__(wiring.Signature({
             "inputs": In(stream.Signature(RoutedFlit)).array(n_inputs),
             "output": Out(FlitWithVCStream),
@@ -449,6 +449,7 @@ class StreamCrossbarOutput(Component):
         if isinstance(target, data.Const):
             target = [target]
         self._target = target
+        self._needs_arb = needs_arb
 
     def elaborate(self, _):
         m = Module()
@@ -456,20 +457,30 @@ class StreamCrossbarOutput(Component):
         target = self._target
 
 
-        m.submodules["arbiter"] = arb = RRStreamArbiter(FlitWithVC, len(inputs))
-        for i, input in enumerate(inputs):
-            m.d.comb += [
-                arb.input[i].valid.eq(input.valid & Value.cast(input.p.target).matches(*target)),
-                arb.input[i].p.flit.eq(input.p.flit),
-                arb.input[i].p.vc.eq(input.p.target.vc_id),
-                self.input_ready[i].eq(arb.input[i].ready)
-            ]
+        if self._needs_arb:
+            m.submodules["arbiter"] = arb = RRStreamArbiter(FlitWithVC, len(inputs))
+            for i, input in enumerate(inputs):
+                m.d.comb += [
+                    arb.input[i].valid.eq(input.valid & Value.cast(input.p.target).matches(*target)),
+                    arb.input[i].p.flit.eq(input.p.flit),
+                    arb.input[i].p.vc.eq(input.p.target.vc_id),
+                    self.input_ready[i].eq(arb.input[i].ready)
+                ]
 
-        m.d.comb += [
-            self.output.valid.eq(arb.output.valid),
-            self.output.p.eq(arb.output.p.p),
-            arb.output.ready.eq(self.output.ready)
-        ]
+            m.d.comb += [
+                self.output.valid.eq(arb.output.valid),
+                self.output.p.eq(arb.output.p.p),
+                arb.output.ready.eq(self.output.ready)
+            ]
+        else:
+            for i, input in enumerate(inputs):
+                with m.If(input.valid  & Value.cast(input.p.target).matches(*target)):
+                    m.d.comb += [
+                        self.output.valid.eq(1),
+                        self.output.p.flit.eq(input.p.flit),
+                        self.output.p.vc.eq(input.p.target.vc_id),
+                        self.input_ready[i].eq(self.output.ready)
+                    ]
 
         return m
 
@@ -614,7 +625,7 @@ class RouterCrossbar(Component):
             inputs_for_output = list(
                 input for (src, input) in cb_input_ports if self.should_connect(src, target)
             )
-            output = m.submodules[f"crossbar_output_{name}"] = StreamCrossbarOutput(len(inputs_for_output), target)
+            output = m.submodules[f"crossbar_output_{name}"] = StreamCrossbarOutput(len(inputs_for_output), target, needs_arb=len(target) > 1)
 
             for i, input in enumerate(inputs_for_output):
                 wiring.connect(m, output.inputs[i], input)

@@ -200,7 +200,7 @@ class ArqSender(Component):
             timeout_occured_debug.eq(timeout_occured)
         ]
         event_annotation(ack_recieved, "ack recieved")
-        event_annotation(ack_recieved, "nack recieved")
+        event_annotation(nack_recieved, "nack recieved")
         event_annotation(timeout_occured_debug, "ack timeout")
         span_annotation(is_resend, "resending")
 
